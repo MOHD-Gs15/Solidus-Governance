@@ -1,0 +1,148 @@
+package com.solidus.governance.automation;
+
+import com.solidus.governance.GovernanceConfig;
+import com.solidus.governance.SolidusGovernanceMod;
+import com.solidus.governance.engine.GovernanceEngine;
+import com.solidus.governance.integration.SolidusIntegration;
+import java.util.ArrayList;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import net.minecraft.server.MinecraftServer;
+
+public class GovernanceAutomator {
+    private GovernanceEngine engine;
+    private volatile boolean lockdownActive = false;
+    private volatile String lockdownReason = null;
+    private volatile boolean autoFreezeEnabled = false;
+
+    public GovernanceAutomator(GovernanceEngine engine) {
+        this.engine = engine;
+    }
+
+    public void setEngine(GovernanceEngine engine) {
+        this.engine = engine;
+    }
+
+    public void initialize() {
+        GovernanceConfig config = this.engine.getConfig();
+        if (config.getBool("automation.enabled", false)) {
+            this.autoFreezeEnabled = config.getBool("automation.auto-freeze.enabled", false);
+            SolidusGovernanceMod.LOGGER.info("Governance Automator initialized. Automation ENABLED.");
+            SolidusGovernanceMod.LOGGER.info("  Anti-inflation: {}", (Object)(config.getBool("automation.anti-inflation.enabled", false) ? "ON" : "OFF"));
+            SolidusGovernanceMod.LOGGER.info("  Wealth caps: {}", (Object)(config.getBool("automation.wealth-cap.enabled", false) ? "ON" : "OFF"));
+            SolidusGovernanceMod.LOGGER.info("  Emergency lockdown: {}", (Object)(config.getBool("automation.emergency-lockdown.enabled", false) ? "ON" : "OFF"));
+            SolidusGovernanceMod.LOGGER.info("  Auto-freeze: {}", (Object)(this.autoFreezeEnabled ? "ON" : "OFF"));
+        } else {
+            SolidusGovernanceMod.LOGGER.info("Governance Automator initialized. Automation DISABLED.");
+        }
+    }
+
+    public void onPeriodicCheck() {
+        if (!this.engine.isPremiumEnabled()) {
+            return;
+        }
+        if (!this.engine.getConfig().getBool("automation.enabled", false)) {
+            return;
+        }
+        this.checkAntiInflation();
+        this.checkWealthCaps();
+    }
+
+    private void checkAntiInflation() {
+        if (!this.engine.getConfig().getBool("automation.anti-inflation.enabled", false)) {
+            return;
+        }
+        double threshold = this.engine.getConfig().getDouble("automation.anti-inflation.threshold", 15.0);
+        double currentAuctionRate = this.engine.getConfig().getDouble("taxation.auction.rate", 0.05);
+        double maxRate = 0.25;
+        SolidusIntegration.getTopBalances(100000).thenAccept(balances -> {
+            double avgBalance;
+            double totalSupply = 0.0;
+            for (SolidusIntegration.BalanceEntry entry : balances) {
+                totalSupply += entry.balance();
+            }
+            double d = avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
+            if (avgBalance > threshold && currentAuctionRate < maxRate) {
+                double newRate = Math.min(currentAuctionRate + 0.01, maxRate);
+                this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
+                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_INCREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
+                this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Increased", "Auction tax increased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
+                SolidusGovernanceMod.LOGGER.info("Anti-inflation: Auction tax increased from {}% to {}% (avg balance: {})", new Object[]{String.format("%.1f", currentAuctionRate * 100.0), String.format("%.1f", newRate * 100.0), String.format("%.2f", avgBalance)});
+            } else if (avgBalance < threshold * 0.8 && currentAuctionRate > 0.05) {
+                double newRate = Math.max(currentAuctionRate - 0.005, 0.05);
+                this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
+                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_DECREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
+                this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Decreased", "Auction tax decreased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
+            } else {
+                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_CHECK", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";action=monitoring");
+            }
+        });
+    }
+
+    private void checkWealthCaps() {
+        if (!this.engine.getConfig().getBool("automation.wealth-cap.enabled", false)) {
+            return;
+        }
+        double maxBalance = this.engine.getConfig().getDouble("automation.wealth-cap.amount", 1.0E7);
+        SolidusIntegration.getTopBalances(100).thenCompose(balances -> {
+            ArrayList<CompletionStage> capFutures = new ArrayList<CompletionStage>();
+            for (SolidusIntegration.BalanceEntry entry : balances) {
+                if (!(entry.balance() > maxBalance)) continue;
+                double excess = entry.balance() - maxBalance;
+                CompletionStage capChain = ((CompletableFuture)SolidusIntegration.setBalance(null, entry.playerName(), maxBalance).thenAccept(result -> {
+                    MinecraftServer srv = SolidusIntegration.getServer();
+                    if (result != null && result.booleanValue()) {
+                        if (this.engine != null && srv != null) {
+                            srv.execute(() -> this.engine.getAuditLogger().logAutomation("WEALTH_CAP_ENFORCED", "player=" + entry.playerName() + ";balance=" + entry.balance() + ";cap=" + maxBalance + ";excess_removed=" + String.format("%.2f", excess)));
+                        }
+                        this.sendDiscordAlert("AUTOMATION", "Wealth Cap Enforced", "Player " + entry.playerName() + " capped from " + String.format("%.2f", entry.balance()) + " to " + String.format("%.2f", maxBalance) + " (excess: " + String.format("%.2f", excess) + " removed)");
+                        SolidusGovernanceMod.LOGGER.info("Wealth cap enforced: {} had {} (excess: {} removed)", new Object[]{entry.playerName(), String.format("%.2f", entry.balance()), String.format("%.2f", excess)});
+                    } else if (this.engine != null && srv != null) {
+                        srv.execute(() -> this.engine.getAuditLogger().logAutomation("WEALTH_CAP_FAILED", "player=" + entry.playerName() + ";reason=setBalance_failed"));
+                    }
+                })).exceptionally(ex -> {
+                    SolidusGovernanceMod.LOGGER.debug("Wealth cap enforcement failed for {}", (Object)entry.playerName());
+                    return null;
+                });
+                capFutures.add(capChain);
+            }
+            if (capFutures.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            return CompletableFuture.allOf(capFutures.toArray(new CompletableFuture[0]));
+        });
+    }
+
+    public void activateLockdown(UUID adminUuid, String adminName, String reason) {
+        this.lockdownActive = true;
+        this.lockdownReason = reason;
+        this.engine.getInterventionManager().lockTrading(adminUuid, adminName, "EMERGENCY: " + reason);
+        this.engine.getAuditLogger().logAutomation("EMERGENCY_LOCKDOWN_ACTIVATED", "reason=" + reason + ";admin=" + adminName);
+        this.sendDiscordAlert("LOCKDOWN", "Emergency Lockdown Activated", "Lockdown activated by " + adminName + ": " + reason);
+        SolidusGovernanceMod.LOGGER.warn("EMERGENCY ECONOMY LOCKDOWN ACTIVATED: {}", (Object)reason);
+    }
+
+    public void deactivateLockdown(UUID adminUuid, String adminName) {
+        this.lockdownActive = false;
+        this.lockdownReason = null;
+        this.engine.getInterventionManager().unlockTrading(adminUuid, adminName);
+        this.engine.getAuditLogger().logAutomation("EMERGENCY_LOCKDOWN_DEACTIVATED", "admin=" + adminName);
+        this.sendDiscordAlert("LOCKDOWN", "Emergency Lockdown Deactivated", "Lockdown deactivated by " + adminName);
+        SolidusGovernanceMod.LOGGER.info("Emergency economy lockdown deactivated.");
+    }
+
+    public boolean isLockdownActive() {
+        return this.lockdownActive;
+    }
+
+    public String getLockdownReason() {
+        return this.lockdownReason;
+    }
+
+    private void sendDiscordAlert(String category, String title, String description) {
+        if (this.engine != null && this.engine.getWebhookManager() != null) {
+            this.engine.getWebhookManager().sendAlert(category, title, description);
+        }
+    }
+}

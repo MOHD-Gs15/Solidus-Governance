@@ -1,0 +1,27 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Runtime data and secrets
+run/
+logs/
+*.log
+config/
+*.db
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+.env
+
+# Generated artifacts
+*.jar
+!gradle/wrapper/gradle-wrapper.jar

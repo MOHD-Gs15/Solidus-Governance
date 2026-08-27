@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "solidus-governance",
+  "version": "${version}",
+  "name": "Solidus Governance",
+  "description": "Auditing, interventions, limits, policies, recovery, and economy governance for Solidus.",
+  "authors": ["MOHD_Gs"],
+  "contact": {
+    "sources": "https://github.com/MOHD-Gs15/solidus-governance"
+  },
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "server": [
+      "com.solidus.governance.SolidusGovernanceMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.4",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": ">=0.155.2+26.1.2"
+  },
+  "suggests": {
+    "solidus": "*"
+  }
+}
