@@ -101,7 +101,7 @@ Config-driven per-player transfer and auction limits with daily usage persistenc
 * Per-player admin reset, audited
 * Every rejected transaction is logged to the audit trail and (optionally) Discord
 
-> **Enforcement scope**: limit checks and trading-lock *enforcement inside Core's `/pay` and auction flows* require a Core-side hook that does not exist yet — today Governance tracks usage, exposes status, and logs violations, while balance mutations, freezes (on Governance operations), wealth decay, and wealth caps are fully enforced.
+> **Enforcement scope (Governance 1.2.0 + Core 2.1.0+)**: Governance registers a transaction hook with Core at server start, so the emergency trading lock and frozen accounts are **always enforced inside Core's `/pay`, auction, and shop flows** — a denied transaction never moves money, and its reason is shown to the player. Daily limit enforcement inside Core requires a premium license (in free mode limit checks pass through while usage stays tracked and audited). Taxes are collected on settled transfers (sender), auction sales (seller), and shop purchases (buyer) whenever `taxation.enabled=true`. On older Core versions (< 2.1.0) or standalone mode, Governance degrades gracefully to tracking, status views, and violation logging only.
 
 ### Taxation
 
@@ -170,7 +170,7 @@ An observational engine that samples the economy on a background thread and repo
 
 | Free | Premium (license key required) |
 | --- | --- |
-| Audit trail, interventions, freezes, suspicious accounts | Transaction limits enforcement |
+| Audit trail, interventions, freezes, suspicious accounts | Transaction limits (free mode: tracked + logged only; enforced inside Core with a license) |
 | Snapshots, rollback, dry-run, timeline | Discord webhooks (all categories) |
 | Taxation config, wealth decay, progressive brackets | Economy events |
 | Anti-inflation, wealth caps, emergency lockdown | Policies, conditional rules, agent simulation |
@@ -362,7 +362,8 @@ com.solidus.governance/
 │   ├── ProfileGenerator.java   — Balance, rank, weekly stats, flags
 │   └── PlayerProfile.java      — Profile model and formatters
 ├── integration/
-│   └── SolidusIntegration.java — Reflection bridge to Solidus Core
+│   ├── SolidusIntegration.java — Reflection bridge to Solidus Core
+│   └── CoreHookBridge.java — Registers the 1.2.0 enforcement hook with Core 2.1.0+ (vetoes + taxes)
 └── commands/
     └── GovernanceCommand.java  — /governance command tree
 ```
@@ -407,7 +408,7 @@ Transaction limits, Discord webhooks, economy events, policies, conditional rule
 
 ### Does freezing an account block Core's `/pay`?
 
-**Not yet.** Core does not currently expose an enforcement hook that Governance could gate `/pay` or auction flows with. Freezes are enforced on every Governance-side balance operation, and blocking enforcement inside Core is the planned integration milestone. The same applies to trading-lock enforcement and real-time limit checks.
+**Yes** (Governance 1.2.0 with Core 2.1.0+). Governance registers a transaction hook with Core at server start; Core consults it before every `/pay`, auction listing/purchase, and shop transaction, so frozen accounts, the emergency trading lock, and daily limits are enforced at the source — a denial aborts the transaction before any balance changes, with the reason shown to the player. Taxes on transfers, auction sales, and shop purchases are collected automatically after a transaction settles. On Core versions without the hook API, Governance falls back to standalone mode: freezes still apply to Governance-side operations, and limits remain tracked and logged but not enforced inside Core.
 
 ### Where is my data stored?
 

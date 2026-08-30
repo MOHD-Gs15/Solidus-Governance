@@ -78,6 +78,17 @@ public class SolidusIntegration {
         return solidusLoaded;
     }
 
+    /**
+     * Returns the raw SolidusAPI instance (may be null when Core is absent
+     * or detection has not succeeded yet). Exposed for the CoreHookBridge,
+     * which registers an enforcement hook through the API surface.
+     *
+     * @since 1.2.0
+     */
+    public static Object getApi() {
+        return apiInstance;
+    }
+
     public static UUID resolvePlayerUuid(String playerName) {
         if (playerName == null || playerName.isBlank()) {
             return null;

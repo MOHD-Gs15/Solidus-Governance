@@ -10,6 +10,7 @@ import com.solidus.governance.discord.WebhookManager;
 import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.events.EventDatabase;
 import com.solidus.governance.events.EventManager;
+import com.solidus.governance.integration.CoreHookBridge;
 import com.solidus.governance.integration.SolidusIntegration;
 import com.solidus.governance.intervention.AccountFreezer;
 import com.solidus.governance.intervention.InterventionManager;
@@ -42,7 +43,7 @@ import org.slf4j.LoggerFactory;
 public class SolidusGovernanceMod
 implements DedicatedServerModInitializer {
     public static final String MOD_ID = "solidus-governance";
-    public static final String VERSION = "1.1.0";
+    public static final String VERSION = "1.2.0";
     public static final Logger LOGGER = LoggerFactory.getLogger((String)"solidus-governance");
     private GovernanceEngine engine;
     private LimitsDatabase limitsDatabase;
@@ -139,7 +140,16 @@ implements DedicatedServerModInitializer {
         taxEngine.initialize();
         automator.initialize();
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> GovernanceCommand.register((CommandDispatcher<CommandSourceStack>)dispatcher, this.engine));
-        ServerLifecycleEvents.SERVER_STARTING.register(server -> LOGGER.info("Solidus Governance: Server starting..."));
+        ServerLifecycleEvents.SERVER_STARTING.register(server -> {
+            LOGGER.info("Solidus Governance: Server starting...");
+            // Register the Core enforcement hook here rather than during mod
+            // init: Fabric init order is undefined between suggested mods, so
+            // Core's SolidusAPI may not exist yet during onInitializeServer.
+            // By SERVER_STARTING every mod is initialized. registerIfNeeded
+            // re-runs Core detection first (fixes the init-order race) and is
+            // idempotent, so repeated server starts never duplicate hooks.
+            CoreHookBridge.registerIfNeeded(this.engine);
+        });
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             treasuryManager.setServer(server);
             snapshotManager.setServer(server);
@@ -168,6 +178,7 @@ implements DedicatedServerModInitializer {
                 this.ruleDatabase.shutdown();
             }
             SolidusIntegration.clearUuidCache();
+            CoreHookBridge.unregister();
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             if (this.engine != null) {
