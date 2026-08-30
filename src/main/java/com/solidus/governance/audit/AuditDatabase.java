@@ -19,13 +19,22 @@ import java.util.concurrent.TimeUnit;
 
 public class AuditDatabase {
     private static final String DB_NAME = "governance.db";
+
+    /**
+     * Maximum number of rows a single audit export may return. Exports are
+     * rare admin operations; the cap (newest rows win) keeps them bounded.
+     */
+    public static final int MAX_EXPORT_ROWS = 200_000;
+
     private final String databaseUrl;
+    private final Path configDir;
     private final ExecutorService executor;
     private volatile Connection connection;
     private volatile boolean initialized = false;
 
     public AuditDatabase(Path configDir) {
         this.databaseUrl = "jdbc:sqlite:" + configDir.resolve(DB_NAME).toString();
+        this.configDir = configDir;
         this.executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "Solidus-Governance-DB");
             t.setDaemon(true);
@@ -134,6 +143,52 @@ public class AuditDatabase {
             SolidusGovernanceMod.LOGGER.error("Failed to query audit logs", (Throwable)e);
         }
         return entries;
+    }
+
+    /**
+     * Returns audit entries within a time window, newest first. Used by
+     * {@code /governance audit export csv [days]} to serialize the trail
+     * for external bookkeeping. Capped at {@link #MAX_EXPORT_ROWS}
+     * (newest rows win) so an export can never exhaust server memory.
+     *
+     * @param sinceEpochMs Inclusive lower bound on row timestamps (millis)
+     * @return matching entries, newest first (empty if not initialized)
+     */
+    public List<AuditEntry> getAuditLogsSince(long sinceEpochMs) {
+        return this.getAuditLogsSince(sinceEpochMs, MAX_EXPORT_ROWS);
+    }
+
+    /** Windowed read with an explicit row cap. */
+    public List<AuditEntry> getAuditLogsSince(long sinceEpochMs, int maxRows) {
+        if (!this.initialized) {
+            return List.of();
+        }
+        ArrayList<AuditEntry> entries = new ArrayList<AuditEntry>();
+        try {
+            String sql = "SELECT * FROM audit_log WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?";
+            try (PreparedStatement ps = this.connection.prepareStatement(sql);){
+                ps.setLong(1, sinceEpochMs);
+                ps.setInt(2, Math.max(0, maxRows));
+                try (ResultSet rs = ps.executeQuery();){
+                    while (rs.next()) {
+                        entries.add(this.auditEntryFromRs(rs));
+                    }
+                }
+            }
+        }
+        catch (SQLException e) {
+            SolidusGovernanceMod.LOGGER.error("Failed to query audit logs since " + sinceEpochMs, (Throwable)e);
+        }
+        return entries;
+    }
+
+    /**
+     * Directory where CSV exports are written:
+     * {@code <config dir>/solidus-governance/exports/} (created lazily by
+     * the exporter, not here).
+     */
+    public Path getExportsDir() {
+        return this.configDir.resolve("exports");
     }
 
     public List<AuditEntry> searchByTarget(UUID targetUuid, int limit) {

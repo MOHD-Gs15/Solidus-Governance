@@ -205,6 +205,7 @@ See [SECURITY.md](SECURITY.md) for the secrets policy — license keys, webhook 
 /governance fingerprint                  ← Server fingerprint for license binding
 /governance tax rates                    ← Current tax configuration
 /governance audit recent 10              ← Last 10 audited actions
+/governance audit export csv 30          ← Export the audit trail to CSV
 /governance snapshot create baseline     ← Name a recovery snapshot now
 ```
 
@@ -234,6 +235,7 @@ Root command: `/governance` (alias `/gov`). Status views are available to game m
 | `/governance tax rates` · `tax set <type> <rate>` | View/adjust transfer, auction, shop rates |
 | `/governance tax brackets list\|add\|remove` | Progressive tax brackets |
 | `/governance audit recent [n]` · `audit search <query>` | Audit trail queries |
+| `/governance audit export csv [days]` | Export the audit trail to RFC 4180 CSV (default 7 days, max 365) → `config/solidus-governance/exports/` |
 | `/governance recovery snapshot create\|list` | Economy snapshots |
 | `/governance rollback <auditId>` · `dryrun <auditId>` | Execute or preview a rollback |
 | `/governance timeline <player>` | Recent balance timeline with deltas |
