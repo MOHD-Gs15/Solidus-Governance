@@ -92,6 +92,8 @@ public class GovernanceEngine {
         if (this.tickCounter % 72000L == 0L) {
             if (this.config.getBool("taxation.enabled", false)) {
                 this.taxEngine.applyWealthDecay();
+                // Retry parked tax debts hourly (anti-avoidance ledger).
+                this.taxEngine.processPendingTaxes();
             }
             if (this.config.getBool("recovery.snapshot.auto-enabled", false)) {
                 this.snapshotManager.autoSnapshot();

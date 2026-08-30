@@ -5,6 +5,7 @@ import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.integration.SolidusIntegration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.UUID;
@@ -16,6 +17,8 @@ import net.minecraft.server.MinecraftServer;
 public class TaxEngine {
     private GovernanceEngine engine;
     private final NavigableMap<Double, Double> progressiveBrackets = new ConcurrentSkipListMap<Double, Double>();
+    /** Persistent ledger of uncollectable tax debts (anti-avoidance). Wired via {@link #setLedger}. */
+    private volatile TaxLedgerDatabase ledger;
 
     public TaxEngine(GovernanceEngine engine) {
         this.engine = engine;
@@ -23,6 +26,10 @@ public class TaxEngine {
 
     public void setEngine(GovernanceEngine engine) {
         this.engine = engine;
+    }
+
+    public void setLedger(TaxLedgerDatabase ledger) {
+        this.ledger = ledger;
     }
 
     public void initialize() {
@@ -79,10 +86,43 @@ public class TaxEngine {
         return this.calculateProgressiveTax(balanceAfter + transferAmount, transferAmount);
     }
 
+    /**
+     * Collects a tax, parking it as persistent debt when collection fails.
+     *
+     * <p>Anti-avoidance fix: the previous version silently dropped the tax
+     * when the player could not afford it at settlement time (or the balance
+     * lookup failed), so keeping a near-zero balance dodged every tax. Failed
+     * collections are now recorded in {@link TaxLedgerDatabase} and retried by
+     * {@link #processPendingTaxes()} until they succeed or exhaust the retry
+     * budget.</p>
+     */
     public CompletableFuture<Double> collectTaxAsync(UUID playerUuid, String playerName, String taxType, double taxAmount) {
         if (!Double.isFinite(taxAmount) || taxAmount <= 0.0 || this.engine == null) {
             return CompletableFuture.completedFuture(0.0);
         }
+        return collectNow(playerUuid, playerName, taxType, taxAmount)
+            .thenCompose(collected -> {
+                if (collected > 0.0) {
+                    return CompletableFuture.completedFuture(collected);
+                }
+                enqueuePendingTax(playerUuid, playerName, taxType, taxAmount,
+                    "collection failed at transaction time");
+                return CompletableFuture.completedFuture(0.0);
+            })
+            .exceptionally(ex -> {
+                SolidusGovernanceMod.LOGGER.error("Failed to collect tax from {}", playerName, ex);
+                enqueuePendingTax(playerUuid, playerName, taxType, taxAmount,
+                    "exception: " + ex);
+                return 0.0;
+            });
+    }
+
+    /**
+     * One collection attempt with no failure handling beyond status reporting:
+     * returns the collected amount, or 0.0 when the balance lookup failed, the
+     * player cannot afford the tax, or the subtraction was rejected.
+     */
+    private CompletableFuture<Double> collectNow(UUID playerUuid, String playerName, String taxType, double taxAmount) {
         return SolidusIntegration.getBalance(playerUuid, playerName)
             .thenCompose(balanceBeforeValue -> {
                 double before = balanceBeforeValue != null && Double.isFinite(balanceBeforeValue) && balanceBeforeValue >= 0.0 ? balanceBeforeValue : 0.0;
@@ -118,11 +158,49 @@ public class TaxEngine {
                             return taxAmount;
                         });
                     });
-            })
-            .exceptionally(ex -> {
-                SolidusGovernanceMod.LOGGER.error("Failed to collect tax from {}", playerName, ex);
-                return 0.0;
             });
+    }
+
+    /**
+     * Periodic sweeper for parked tax debts (called from GovernanceEngine.onTick).
+     * Retries the oldest pending taxes; successful collections leave the
+     * ledger, failures consume one of {@link TaxLedgerDatabase#MAX_ATTEMPTS}
+     * attempts before the debt is dropped with an ERROR log.
+     */
+    public void processPendingTaxes() {
+        if (this.ledger == null || !this.ledger.isInitialized() || this.engine == null) {
+            return;
+        }
+        if (!this.engine.getConfig().getBool("taxation.enabled", false)) {
+            return;
+        }
+        List<TaxLedgerDatabase.PendingTax> due = this.ledger.loadDuePendingTaxes(25, TaxLedgerDatabase.MAX_ATTEMPTS);
+        for (TaxLedgerDatabase.PendingTax tax : due) {
+            collectNow(tax.playerUuid(), tax.playerName(), tax.taxType(), tax.amount())
+                .thenAccept(collected -> {
+                    if (collected > 0.0) {
+                        this.ledger.markCollected(tax.id());
+                        SolidusGovernanceMod.LOGGER.info("Pending tax #{} collected on retry ({} for {})",
+                            tax.id(), tax.amount(), tax.playerName());
+                    } else {
+                        this.ledger.markAttempt(tax.id(), "retry failed");
+                    }
+                })
+                .exceptionally(ex -> {
+                    this.ledger.markAttempt(tax.id(), ex.toString());
+                    return null;
+                });
+        }
+    }
+
+    private void enqueuePendingTax(UUID playerUuid, String playerName, String taxType, double taxAmount, String reason) {
+        if (this.ledger != null && this.ledger.isInitialized()) {
+            this.ledger.enqueuePendingTax(playerUuid, playerName, taxType, taxAmount, reason);
+        } else {
+            SolidusGovernanceMod.LOGGER.warn(
+                "Tax of {} could not be collected from {} and no tax ledger is wired - tax lost! ({})",
+                taxAmount, playerName, reason);
+        }
     }
 
     public void applyWealthDecay() {

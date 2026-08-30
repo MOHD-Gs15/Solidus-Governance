@@ -26,6 +26,7 @@ import com.solidus.governance.rules.RuleDatabase;
 import com.solidus.governance.rules.RuleEngine;
 import com.solidus.governance.simulation.SimulationEngine;
 import com.solidus.governance.taxation.TaxEngine;
+import com.solidus.governance.taxation.TaxLedgerDatabase;
 import com.solidus.governance.taxation.TreasuryManager;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -47,6 +48,7 @@ implements DedicatedServerModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger((String)"solidus-governance");
     private GovernanceEngine engine;
     private LimitsDatabase limitsDatabase;
+    private TaxLedgerDatabase taxLedgerDatabase;
     private EventDatabase eventDatabase;
     private PolicyDatabase policyDatabase;
     private RuleDatabase ruleDatabase;
@@ -78,12 +80,15 @@ implements DedicatedServerModInitializer {
         GovernanceAutomator automator = new GovernanceAutomator(null);
         this.limitsDatabase = new LimitsDatabase(configDir);
         this.limitsDatabase.initialize();
+        this.taxLedgerDatabase = new TaxLedgerDatabase(configDir);
+        this.taxLedgerDatabase.initialize();
         this.engine = new GovernanceEngine(config, auditDatabase, auditLogger, licenseVerifier, accountFreezer, interventionManager, taxEngine, treasuryManager, rollbackEngine, snapshotManager, automator);
         TransactionLimits transactionLimits = new TransactionLimits(config, this.limitsDatabase, this.engine);
         this.engine.setTransactionLimits(transactionLimits);
         accountFreezer.setEngine(this.engine);
         interventionManager.setEngine(this.engine);
         taxEngine.setEngine(this.engine);
+        taxEngine.setLedger(this.taxLedgerDatabase);
         treasuryManager.setEngine(this.engine);
         rollbackEngine.setEngine(this.engine);
         snapshotManager.setEngine(this.engine);
@@ -167,6 +172,9 @@ implements DedicatedServerModInitializer {
             }
             if (this.limitsDatabase != null) {
                 this.limitsDatabase.shutdown();
+                if (this.taxLedgerDatabase != null) {
+                    this.taxLedgerDatabase.shutdown();
+                }
             }
             if (this.eventDatabase != null) {
                 this.eventDatabase.shutdown();
