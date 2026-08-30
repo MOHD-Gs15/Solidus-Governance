@@ -52,6 +52,33 @@ public class TaxEngine {
         return TaxEngine.roundTax(amount * bracket.getValue());
     }
 
+    /**
+     * Progressive transfer tax with post-settlement balance reconstruction.
+     *
+     * <p>Bridge notification hooks ({@code afterTransfer}) observe the sender's
+     * balance <b>after</b> the transfer has settled, while brackets are meant
+     * to classify the sender's wealth <b>at transaction time</b>. The
+     * pre-transfer balance is therefore reconstructed as
+     * {@code balanceBefore = balanceAfter + transferAmount} and bracket
+     * selection uses that value, so a large payout cannot drop the sender
+     * into a lower bracket before their own tax is computed.</p>
+     *
+     * <p>No-op (0.0) when no brackets are configured.</p>
+     *
+     * @param balanceAfter   the sender's observed balance after the transfer settled
+     * @param transferAmount the transferred amount
+     * @return the progressive tax due on the transfer, rounded to 2 decimals
+     */
+    public double calculateProgressiveTransferTax(double balanceAfter, double transferAmount) {
+        if (this.progressiveBrackets.isEmpty()) {
+            return 0.0;
+        }
+        if (!Double.isFinite(balanceAfter) || balanceAfter < 0.0 || !Double.isFinite(transferAmount) || transferAmount <= 0.0) {
+            return 0.0;
+        }
+        return this.calculateProgressiveTax(balanceAfter + transferAmount, transferAmount);
+    }
+
     public CompletableFuture<Double> collectTaxAsync(UUID playerUuid, String playerName, String taxType, double taxAmount) {
         if (!Double.isFinite(taxAmount) || taxAmount <= 0.0 || this.engine == null) {
             return CompletableFuture.completedFuture(0.0);

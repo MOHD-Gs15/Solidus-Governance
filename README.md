@@ -107,7 +107,7 @@ Config-driven per-player transfer and auction limits with daily usage persistenc
 
 * Transfer, auction, and shop tax rates (validated to 0–100%, every change audited)
 * Treasury account — collected taxes are deposited into a configured UUID
-* Progressive tax brackets (`/governance tax brackets add`) — rate by balance floor
+* Progressive tax brackets (`/governance tax brackets add`) — applied to transfers on the sender when `taxation.enabled` is on: the bracket is selected by the sender's pre-transfer balance floor and collected under its own audit type `PROGRESSIVE`
 * **Wealth decay** — hourly decay of balances above a configurable threshold, computed from the live balance at execution time and fully audited
 
 ### Recovery

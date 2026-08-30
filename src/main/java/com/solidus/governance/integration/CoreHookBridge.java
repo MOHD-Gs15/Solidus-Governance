@@ -26,8 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       frozen accounts, daily transfer limits, daily auction listing
  *       limits.</li>
  *   <li><b>Observation (after settlement):</b> daily usage recording and
- *       transaction tax collection (transfer tax on the sender, auction tax
- *       on the seller at sale time, shop tax on the buyer).</li>
+ *       transaction tax collection (transfer tax on the sender, progressive
+ *       wealth-bracket tax on the sender when brackets are configured,
+ *       auction tax on the seller at sale time, shop tax on the buyer).</li>
  * </ul>
  *
  * <p><b>Zero compile dependency:</b> the hook is a {@link Proxy} implementing
@@ -43,7 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p><b>Enforcement matrix (when registered):</b></p>
  * <table border="1">
  *   <tr><th>Hook point</th><th>Vetoes</th><th>After settlement</th></tr>
- *   <tr><td>allowTransfer</td><td>trading lock, frozen sender, transfer limits</td><td>recordTransfer + transfer tax (sender)</td></tr>
+ *   <tr><td>allowTransfer</td><td>trading lock, frozen sender, transfer limits</td><td>recordTransfer + transfer tax (sender) + progressive bracket tax (sender, if brackets configured)</td></tr>
  *   <tr><td>allowAuctionListing</td><td>trading lock, frozen seller, auction limit</td><td>recordAuctionListing</td></tr>
  *   <tr><td>allowAuctionPurchase</td><td>trading lock, frozen buyer</td><td>auction tax (seller, at sale)</td></tr>
  *   <tr><td>allowShopPurchase</td><td>trading lock, frozen buyer</td><td>shop tax (buyer)</td></tr>
@@ -243,6 +244,7 @@ public final class CoreHookBridge {
                         collectTax("TRANSFER", sender, senderName,
                             engine.getTaxEngine() != null
                                 ? engine.getTaxEngine().calculateTransferTax(amount) : 0.0);
+                        collectProgressiveTransferTax(sender, senderName, amount);
                         return null;
                     }
                     case "afterAuctionListing": {
@@ -335,6 +337,48 @@ public final class CoreHookBridge {
                 engine.getTaxEngine().collectTaxAsync(player, playerName, type, taxAmount);
             } catch (Throwable t) {
                 SolidusGovernanceMod.LOGGER.warn("CoreHookBridge: tax collection dispatch failed: {}", t.toString());
+            }
+        }
+
+        /**
+         * Progressive wealth-bracket tax on transfers (wired in 1.2.1 -
+         * previously {@code /governance tax brackets add} stored brackets
+         * that no code path ever applied).
+         *
+         * <p>Dispatch is fully async: the sender's post-settlement balance is
+         * fetched via SolidusIntegration, the pre-transfer balance is
+         * reconstructed inside
+         * {@link TaxEngine#calculateProgressiveTransferTax}, and the result is
+         * collected under its own audit type {@code PROGRESSIVE} so admins can
+         * distinguish bracket revenue from the flat transfer rate. No-op when
+         * no brackets are configured; {@code collectTax} still honors the
+         * {@code taxation.enabled} master switch.</p>
+         */
+        private void collectProgressiveTransferTax(UUID sender, String senderName, double amount) {
+            TaxEngine taxEngine = engine.getTaxEngine();
+            if (taxEngine == null || taxEngine.getBrackets().isEmpty()) {
+                return;
+            }
+            try {
+                SolidusIntegration.getBalance(sender, senderName)
+                    .thenAccept(balanceAfter -> {
+                        // -1.0 / null means the balance is unavailable (Core
+                        // absent or lookup failed) - skip rather than guess.
+                        if (balanceAfter == null || !Double.isFinite(balanceAfter) || balanceAfter < 0.0) {
+                            return;
+                        }
+                        double progressive = taxEngine.calculateProgressiveTransferTax(balanceAfter, amount);
+                        collectTax("PROGRESSIVE", sender, senderName, progressive);
+                    })
+                    .exceptionally(ex -> {
+                        SolidusGovernanceMod.LOGGER.debug(
+                            "CoreHookBridge: progressive tax balance lookup failed for {}: {}",
+                            senderName, ex.toString());
+                        return null;
+                    });
+            } catch (Throwable t) {
+                SolidusGovernanceMod.LOGGER.warn(
+                    "CoreHookBridge: progressive tax dispatch failed: {}", t.toString());
             }
         }
 

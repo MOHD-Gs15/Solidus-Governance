@@ -264,6 +264,7 @@ public class GovernanceCommand {
         } else {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("  Progressive Tax Brackets:", ChatFormatting.YELLOW));
             brackets.forEach((threshold, rate) -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("    Balance >= " + String.format("%.0f", threshold) + ": " + String.format("%.1f%%", rate * 100.0), ChatFormatting.WHITE)));
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  (applied to transfers on the sender when taxation is enabled; audit type: PROGRESSIVE)", ChatFormatting.DARK_GRAY));
         }
         return 1;
     }
