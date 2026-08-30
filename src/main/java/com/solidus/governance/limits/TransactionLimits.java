@@ -25,6 +25,22 @@ public class TransactionLimits {
         this.engine = engine;
     }
 
+    /**
+     * Atomically checks AND reserves the transfer against the daily limit.
+     *
+     * <p>TOCTOU fix: the old flow checked the limit in {@code allowTransfer}
+     * and recorded usage later in {@code afterTransfer} - two separate
+     * critical sections with the whole settlement window in between, so two
+     * concurrent transfers could both pass the check and blow past the daily
+     * cap. The check and the usage increment now happen inside ONE
+     * {@code synchronized (usage)} block, and {@link #recordTransfer} no
+     * longer adds the amount again (the reservation already counted it).</p>
+     *
+     * <p>Trade-off: if Core aborts the transfer after this veto (e.g.
+     * insufficient funds), the reserved amount stays counted for the day -
+     * limits can only tighten, never loosen. That is the safe direction
+     * for the economy.</p>
+     */
     public boolean checkTransferLimit(UUID player, double amount) {
         if (!this.engine.isPremiumEnabled()) {
             return true;
@@ -40,57 +56,81 @@ public class TransactionLimits {
             return false;
         }
         double dailyMax = this.config.getDouble("limits.transfer.daily-max", -1.0);
-        if (dailyMax >= 0.0) {
-            DailyUsage usage = this.getOrCreateUsage(player);
-            double newTotal;
-            synchronized (usage) {
-                newTotal = usage.transferTotal + amount;
-            }
-            if (newTotal > dailyMax) {
-                this.auditLimitExceeded(player, "DAILY_TRANSFER_LIMIT", "attempted=" + amount + ";current_total=" + usage.transferTotal + ";daily_max=" + dailyMax);
-                return false;
+        if (dailyMax < 0.0) {
+            return true;
+        }
+        DailyUsage usage = this.getOrCreateUsage(player);
+        boolean allowed;
+        synchronized (usage) {
+            double newTotal = usage.transferTotal + amount;
+            allowed = newTotal <= dailyMax;
+            if (allowed) {
+                usage.transferTotal = newTotal; // atomic check-and-reserve
             }
         }
+        if (!allowed) {
+            this.auditLimitExceeded(player, "DAILY_TRANSFER_LIMIT", "attempted=" + amount + ";current_total=" + usage.transferTotal + ";daily_max=" + dailyMax);
+            return false;
+        }
+        this.persistUsage(player, usage);
         return true;
     }
 
+    /**
+     * Atomically checks AND reserves one auction listing slot.
+     *
+     * <p>TOCTOU fix, same shape as {@link #checkTransferLimit}: the increment
+     * happens in the same critical section as the check, so concurrent
+     * listings cannot both slip past the daily cap.</p>
+     */
     public boolean checkAuctionLimit(UUID player) {
         if (!this.engine.isPremiumEnabled()) {
             return true;
         }
         int dailyMax = this.config.getInt("limits.auction.daily-max", -1);
-        if (dailyMax >= 0) {
-            DailyUsage usage = this.getOrCreateUsage(player);
-            if (usage.auctionCount >= dailyMax) {
-                this.auditLimitExceeded(player, "DAILY_AUCTION_LIMIT", "current_count=" + usage.auctionCount + ";daily_max=" + dailyMax);
-                return false;
+        if (dailyMax < 0) {
+            return true;
+        }
+        DailyUsage usage = this.getOrCreateUsage(player);
+        boolean allowed;
+        synchronized (usage) {
+            allowed = usage.auctionCount < dailyMax;
+            if (allowed) {
+                ++usage.auctionCount; // atomic check-and-reserve
             }
         }
+        if (!allowed) {
+            this.auditLimitExceeded(player, "DAILY_AUCTION_LIMIT", "current_count=" + usage.auctionCount + ";daily_max=" + dailyMax);
+            return false;
+        }
+        this.persistUsage(player, usage);
         return true;
     }
 
+    /**
+     * Kept for hook-API compatibility. Usage is now reserved atomically inside
+     * {@link #checkTransferLimit} at veto time, so this post-settlement
+     * notification must NOT add the amount again - doing so would double-count
+     * every transfer.
+     */
     public void recordTransfer(UUID player, double amount) {
         if (!this.engine.isPremiumEnabled()) {
             return;
         }
         DailyUsage usage = this.getOrCreateUsage(player);
-        synchronized (usage) {
-            usage.transferTotal += amount;
-        }
-        this.persistUsage(player, usage);
-        SolidusGovernanceMod.LOGGER.debug("Recorded transfer of {} for {}. Daily total: {}", new Object[]{amount, player, usage.transferTotal});
+        SolidusGovernanceMod.LOGGER.debug("Transfer of {} for {} confirmed (already reserved at veto time). Daily total: {}", new Object[]{amount, player, usage.transferTotal});
     }
 
+    /**
+     * Kept for hook-API compatibility - see {@link #recordTransfer}. The
+     * listing slot was already reserved atomically at veto time.
+     */
     public void recordAuctionListing(UUID player) {
         if (!this.engine.isPremiumEnabled()) {
             return;
         }
         DailyUsage usage = this.getOrCreateUsage(player);
-        synchronized (usage) {
-            ++usage.auctionCount;
-        }
-        this.persistUsage(player, usage);
-        SolidusGovernanceMod.LOGGER.debug("Recorded auction listing for {}. Daily count: {}", (Object)player, (Object)usage.auctionCount);
+        SolidusGovernanceMod.LOGGER.debug("Auction listing for {} confirmed (already reserved at veto time). Daily count: {}", (Object)player, (Object)usage.auctionCount);
     }
 
     public void resetDailyLimits() {
