@@ -45,7 +45,8 @@ public class DiscordWebhook {
             }
             return this.retryChain(webhookUrl, payload, 1);
         })).exceptionally(ex -> {
-            SolidusGovernanceMod.LOGGER.error("DiscordWebhook: all retries failed for {}", (Object)webhookUrl, ex);
+            // SECURITY: mask the URL - the error log must not leak the webhook token.
+            SolidusGovernanceMod.LOGGER.error("DiscordWebhook: all retries failed for {}", (Object)WebhookManager.maskUrl(webhookUrl), ex);
             return false;
         });
     }

@@ -44,7 +44,9 @@ public class WebhookManager {
     public void setWebhookUrl(String category, String url) {
         String configKey = CATEGORY_CONFIG_KEYS.getOrDefault(category.toLowerCase(), "discord.webhook.default");
         this.config.set(configKey, url != null ? url : "");
-        SolidusGovernanceMod.LOGGER.info("Discord webhook URL set for category '{}': {}", (Object)category, (Object)url);
+        // SECURITY: never log the full webhook URL - anyone who reads it can
+        // post to the channel. Only the masked form (scheme, host, id) goes to logs.
+        SolidusGovernanceMod.LOGGER.info("Discord webhook URL set for category '{}': {}", (Object)category, (Object)WebhookManager.maskUrl(url));
     }
 
     public void removeWebhookUrl(String category) {
@@ -107,6 +109,25 @@ public class WebhookManager {
 
     public boolean isDiscordEnabled() {
         return this.config.getBool("discord.enabled", false);
+    }
+
+    /**
+     * Masks a Discord webhook URL for safe logging: keeps the scheme, host,
+     * and webhook id, and hides the secret token segment that would let
+     * anyone with log access post to the channel.
+     *
+     * <p>{@code https://discord.com/api/webhooks/123456/abc123} becomes
+     * {@code https://discord.com/api/webhooks/123456/****}.</p>
+     */
+    public static String maskUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return "(not set)";
+        }
+        int tokenStart = url.lastIndexOf('/');
+        if (tokenStart > 0 && tokenStart < url.length() - 1) {
+            return url.substring(0, tokenStart + 1) + "****";
+        }
+        return "****";
     }
 
     public double getInterventionThreshold() {
