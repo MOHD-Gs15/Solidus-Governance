@@ -184,10 +184,26 @@ public class GovernanceCommand {
                     .executes(context -> executeSnapshotList(context, engine))))
             .then(Commands.literal("rollback")
                 .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
-                    .executes(context -> executeRollback(context, engine))))
+                    .executes(context -> executeRollback(context, engine)))
+                .then(Commands.literal("player")
+                    .then(Commands.argument("player", EntityArgument.player())
+                        .then(Commands.argument("fromDays", IntegerArgumentType.integer(1))
+                            .executes(context -> executeRollbackPlayer(context, engine))))))
             .then(Commands.literal("dryrun")
                 .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
-                    .executes(context -> executeDryRun(context, engine))))
+                    .executes(context -> executeDryRun(context, engine)))
+                .then(Commands.literal("player")
+                    .then(Commands.argument("player", EntityArgument.player())
+                        .then(Commands.argument("fromDays", IntegerArgumentType.integer(1))
+                            .executes(context -> executeDryRunPlayer(context, engine)))))
+                .then(Commands.literal("timeframe")
+                    .then(Commands.argument("fromDaysBack", IntegerArgumentType.integer(1))
+                        .then(Commands.argument("toDaysBack", IntegerArgumentType.integer(0))
+                            .executes(context -> executeDryRunTimeframe(context, engine))))))
+            .then(Commands.literal("rollback-timeframe")
+                .then(Commands.argument("fromDaysBack", IntegerArgumentType.integer(1))
+                    .then(Commands.argument("toDaysBack", IntegerArgumentType.integer(0))
+                        .executes(context -> executeRollbackTimeframe(context, engine)))))
             .then(Commands.literal("timeline")
                 .then(Commands.argument("player", EntityArgument.player())
                     .executes(context -> executeTimeline(context, engine))));
@@ -730,6 +746,64 @@ public class GovernanceCommand {
         int auditId = IntegerArgumentType.getInteger(context, (String)"auditId");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         engine.getRollbackEngine().dryRunRollback(null, auditId).thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
+        return 1;
+    }
+
+    private static int executeRollbackPlayer(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
+        ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
+        CommandSourceStack source = (CommandSourceStack)context.getSource();
+        int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDays");
+        UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
+        long fromTimestamp = System.currentTimeMillis() - fromDays * 86_400_000L;
+        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rolling back " + player.getName().getString() + " to the state before the last " + fromDays + " day(s)...", ChatFormatting.YELLOW));
+        engine.getRollbackEngine().rollbackPlayer(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), fromTimestamp)
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))));
+        return 1;
+    }
+
+    private static int executeDryRunPlayer(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
+        ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
+        CommandSourceStack source = (CommandSourceStack)context.getSource();
+        int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDays");
+        long fromTimestamp = System.currentTimeMillis() - fromDays * 86_400_000L;
+        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Previewing rollback for " + player.getName().getString() + " (last " + fromDays + " day(s))...", ChatFormatting.YELLOW));
+        engine.getRollbackEngine().dryRunRollbackPlayer(player.getUUID(), player.getName().getString(), fromTimestamp)
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
+        return 1;
+    }
+
+    private static int executeRollbackTimeframe(CommandContext<CommandSourceStack> context, GovernanceEngine engine) {
+        CommandSourceStack source = (CommandSourceStack)context.getSource();
+        int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDaysBack");
+        int toDays = IntegerArgumentType.getInteger(context, (String)"toDaysBack");
+        long now = System.currentTimeMillis();
+        long fromTimestamp = now - fromDays * 86_400_000L;
+        long toTimestamp = now - toDays * 86_400_000L;
+        if (fromTimestamp >= toTimestamp) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  fromDaysBack must be greater than toDaysBack (e.g. rollback-timeframe 7 2 = the window between 7 and 2 days ago).", ChatFormatting.RED));
+            return 0;
+        }
+        UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
+        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rolling back the window between " + fromDays + " and " + toDays + " day(s) ago...", ChatFormatting.YELLOW));
+        engine.getRollbackEngine().rollbackTimeframe(adminUuid, source.getTextName(), fromTimestamp, toTimestamp)
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))));
+        return 1;
+    }
+
+    private static int executeDryRunTimeframe(CommandContext<CommandSourceStack> context, GovernanceEngine engine) {
+        CommandSourceStack source = (CommandSourceStack)context.getSource();
+        int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDaysBack");
+        int toDays = IntegerArgumentType.getInteger(context, (String)"toDaysBack");
+        long now = System.currentTimeMillis();
+        long fromTimestamp = now - fromDays * 86_400_000L;
+        long toTimestamp = now - toDays * 86_400_000L;
+        if (fromTimestamp >= toTimestamp) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  fromDaysBack must be greater than toDaysBack (e.g. dryrun timeframe 7 2 = the window between 7 and 2 days ago).", ChatFormatting.RED));
+            return 0;
+        }
+        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Previewing the rollback window between " + fromDays + " and " + toDays + " day(s) ago...", ChatFormatting.YELLOW));
+        engine.getRollbackEngine().dryRunRollbackTimeframe(fromTimestamp, toTimestamp)
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
         return 1;
     }
 

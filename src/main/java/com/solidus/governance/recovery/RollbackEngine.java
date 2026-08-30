@@ -10,10 +10,23 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.server.MinecraftServer;
 
 public class RollbackEngine {
     private GovernanceEngine engine;
+
+    /**
+     * Concurrency lock (R07): only one rollback may run at a time. Rollbacks
+     * overwrite balances from historical audit snapshots; two interleaved
+     * rollbacks could apply stale restore points on top of each other and
+     * finish in an inconsistent state. Dry runs are read-only and excluded.
+     */
+    private final AtomicBoolean rollbackInProgress = new AtomicBoolean(false);
+
+    private static final String BUSY_MESSAGE =
+        "A rollback operation is already in progress - wait for it to finish "
+            + "(use /governance dryrun to preview safely in the meantime).";
 
     public RollbackEngine(GovernanceEngine engine) {
         this.engine = engine;
@@ -21,6 +34,14 @@ public class RollbackEngine {
 
     public void setEngine(GovernanceEngine engine) {
         this.engine = engine;
+    }
+
+    private boolean tryBeginRollback() {
+        return this.rollbackInProgress.compareAndSet(false, true);
+    }
+
+    private void endRollback() {
+        this.rollbackInProgress.set(false);
     }
 
     public CompletableFuture<String> rollbackById(UUID adminUuid, String adminName, int auditId) {
@@ -37,6 +58,9 @@ public class RollbackEngine {
         try {
             double before = Double.parseDouble(entry.beforeValue);
             UUID targetUuid = UUID.fromString(entry.targetUuid);
+            if (!tryBeginRollback()) {
+                return CompletableFuture.completedFuture(BUSY_MESSAGE);
+            }
             return SolidusIntegration.setBalance(targetUuid, entry.targetName, before).thenApply(result -> {
                 if (result != null && result.booleanValue()) {
                     MinecraftServer srv = SolidusIntegration.getServer();
@@ -50,7 +74,8 @@ public class RollbackEngine {
                     return "Rolled back audit #" + auditId + ": " + entry.targetName + " balance restored to " + before;
                 }
                 return "Failed to roll back audit #" + auditId + ": setBalance returned false.";
-            }).exceptionally(ex -> "Failed to roll back audit #" + auditId + ": " + ((Throwable)ex).getMessage());
+            }).exceptionally(ex -> "Failed to roll back audit #" + auditId + ": " + ((Throwable)ex).getMessage())
+            .whenComplete((ignored, throwable) -> endRollback());
         }
         catch (NumberFormatException e) {
             return CompletableFuture.completedFuture("Failed to roll back audit #" + auditId + ": invalid before/after values.");
@@ -66,7 +91,16 @@ public class RollbackEngine {
         if (restoreEntry == null) {
             return CompletableFuture.completedFuture("No actions to roll back for player " + targetName);
         }
-        double before = Double.parseDouble(restoreEntry.beforeValue);
+        double before;
+        try {
+            before = Double.parseDouble(restoreEntry.beforeValue);
+        }
+        catch (NumberFormatException e) {
+            return CompletableFuture.completedFuture("Failed to roll back player " + targetName + ": invalid before-value in audit #" + restoreEntry.id + ".");
+        }
+        if (!tryBeginRollback()) {
+            return CompletableFuture.completedFuture(BUSY_MESSAGE);
+        }
         return SolidusIntegration.setBalance(targetUuid, targetName, before).thenApply(result -> {
             if (result != null && result.booleanValue()) {
                 MinecraftServer srv = SolidusIntegration.getServer();
@@ -76,7 +110,8 @@ public class RollbackEngine {
                 return "Rolled back 1 action for player " + targetName + ": balance restored to " + before + " (state before audit #" + restoreEntry.id + ", the earliest affected action in the window).";
             }
             return "Failed to roll back player " + targetName + ": setBalance returned false.";
-        }).exceptionally(ex -> "Failed to roll back player " + targetName + ": " + ((Throwable)ex).getMessage());
+        }).exceptionally(ex -> "Failed to roll back player " + targetName + ": " + ((Throwable)ex).getMessage())
+        .whenComplete((ignored, throwable) -> endRollback());
     }
 
     static AuditDatabase.AuditEntry selectRestoreEntry(List<AuditDatabase.AuditEntry> entries, long fromTimestamp, Long toTimestamp) {
@@ -105,7 +140,54 @@ public class RollbackEngine {
 
     public CompletableFuture<String> rollbackTimeframe(UUID adminUuid, String adminName, long fromTimestamp, long toTimestamp) {
         List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(10000);
+        LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
+            RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
+        if (restorePerPlayer.isEmpty()) {
+            return CompletableFuture.completedFuture("No actions to roll back in the specified timeframe.");
+        }
+        if (!tryBeginRollback()) {
+            return CompletableFuture.completedFuture(BUSY_MESSAGE);
+        }
+        ArrayList<CompletableFuture<Boolean>> rollbackFutures = new ArrayList<CompletableFuture<Boolean>>();
+        for (Map.Entry<UUID, AuditDatabase.AuditEntry> restore : restorePerPlayer.entrySet()) {
+            UUID targetUuid = restore.getKey();
+            AuditDatabase.AuditEntry entry = restore.getValue();
+            double before;
+            try {
+                before = Double.parseDouble(entry.beforeValue);
+            }
+            catch (NumberFormatException e) {
+                continue;
+            }
+            CompletableFuture<Boolean> chain = SolidusIntegration.setBalance(targetUuid, entry.targetName, before).thenApply(result -> {
+                if (result != null && result.booleanValue()) {
+                    MinecraftServer srv = SolidusIntegration.getServer();
+                    if (this.engine != null && srv != null) {
+                        srv.execute(() -> this.engine.getAuditLogger().logRollback(adminUuid, adminName, targetUuid, entry.targetName, "TIMEFRAME", entry.id));
+                    }
+                    return true;
+                }
+                return false;
+            }).exceptionally(ex -> false);
+            rollbackFutures.add(chain);
+        }
+        int[] rolledBack = new int[]{0};
+        return CompletableFuture.allOf(rollbackFutures.toArray(new CompletableFuture[0])).thenApply(v -> {
+            for (CompletableFuture<Boolean> future : rollbackFutures) {
+                if (!Boolean.TRUE.equals(future.join())) continue;
+                rolledBack[0] = rolledBack[0] + 1;
+            }
+            return "Rolled back " + rolledBack[0] + " unique players in timeframe (balance restored to the state before their earliest affected action).";
+        }).whenComplete((ignored, throwable) -> endRollback());
+    }
+
+    /** Shared selection logic for timeframe rollbacks and their dry-run preview. */
+    static LinkedHashMap<UUID, AuditDatabase.AuditEntry> selectTimeframeRestorePoints(
+            List<AuditDatabase.AuditEntry> entries, long fromTimestamp, long toTimestamp) {
         LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer = new LinkedHashMap<UUID, AuditDatabase.AuditEntry>();
+        if (entries == null) {
+            return restorePerPlayer;
+        }
         for (AuditDatabase.AuditEntry entry : entries) {
             if (entry.timestamp < fromTimestamp || entry.timestamp > toTimestamp) continue;
             if ("RECOVERY".equals(entry.category) || entry.targetUuid == null || entry.beforeValue == null) continue;
@@ -122,34 +204,7 @@ public class RollbackEngine {
                 restorePerPlayer.put(targetUuid, entry);
             }
         }
-        if (restorePerPlayer.isEmpty()) {
-            return CompletableFuture.completedFuture("No actions to roll back in the specified timeframe.");
-        }
-        ArrayList<CompletableFuture<Boolean>> rollbackFutures = new ArrayList<CompletableFuture<Boolean>>();
-        int[] rolledBack = new int[]{0};
-        for (Map.Entry<UUID, AuditDatabase.AuditEntry> restore : restorePerPlayer.entrySet()) {
-            UUID targetUuid = restore.getKey();
-            AuditDatabase.AuditEntry entry = restore.getValue();
-            double before = Double.parseDouble(entry.beforeValue);
-            CompletableFuture<Boolean> chain = SolidusIntegration.setBalance(targetUuid, entry.targetName, before).thenApply(result -> {
-                if (result != null && result.booleanValue()) {
-                    MinecraftServer srv = SolidusIntegration.getServer();
-                    if (this.engine != null && srv != null) {
-                        srv.execute(() -> this.engine.getAuditLogger().logRollback(adminUuid, adminName, targetUuid, entry.targetName, "TIMEFRAME", entry.id));
-                    }
-                    return true;
-                }
-                return false;
-            }).exceptionally(ex -> false);
-            rollbackFutures.add(chain);
-        }
-        return CompletableFuture.allOf(rollbackFutures.toArray(new CompletableFuture[0])).thenApply(v -> {
-            for (CompletableFuture<Boolean> future : rollbackFutures) {
-                if (!Boolean.TRUE.equals(future.join())) continue;
-                rolledBack[0] = rolledBack[0] + 1;
-            }
-            return "Rolled back " + rolledBack[0] + " unique players in timeframe (balance restored to the state before their earliest affected action).";
-        });
+        return restorePerPlayer;
     }
 
     public CompletableFuture<String> dryRunRollback(UUID adminUuid, int auditId) {
@@ -187,6 +242,94 @@ public class RollbackEngine {
             }
         }
         return CompletableFuture.completedFuture(sb.toString());
+    }
+
+    /**
+     * Dry-run preview for {@link #rollbackPlayer}: shows the computed restore
+     * point and the balance delta WITHOUT touching any balance. Read-only, so
+     * it does not take the rollback lock.
+     */
+    public CompletableFuture<String> dryRunRollbackPlayer(UUID targetUuid, String targetName, long fromTimestamp) {
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, 100);
+        AuditDatabase.AuditEntry restoreEntry = RollbackEngine.selectRestoreEntry(entries, fromTimestamp, null);
+        if (restoreEntry == null) {
+            return CompletableFuture.completedFuture(
+                "[DRY RUN] No reversible actions found for " + targetName + " in the window - nothing would change.");
+        }
+        double restoreTo;
+        try {
+            restoreTo = Double.parseDouble(restoreEntry.beforeValue);
+        }
+        catch (NumberFormatException e) {
+            return CompletableFuture.completedFuture(
+                "[DRY RUN] Earliest affected action #" + restoreEntry.id + " has an invalid before-value - the rollback would be skipped.");
+        }
+        return SolidusIntegration.getBalance(targetUuid, targetName).thenApply(current -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("[DRY RUN] Player rollback preview for ").append(targetName).append(":\n");
+            sb.append("  Restore point: audit #").append(restoreEntry.id).append("\n");
+            sb.append("  Would restore balance to: ").append(String.format("%.2f", restoreTo)).append("\n");
+            if (current != null && Double.isFinite(current)) {
+                sb.append("  Current balance: ").append(String.format("%.2f", current)).append("\n");
+                sb.append("  Change if executed: ").append(String.format("%+.2f", restoreTo - current)).append("\n");
+            } else {
+                sb.append("  Current balance: unavailable\n");
+            }
+            sb.append("  No changes were applied.");
+            return sb.toString();
+        }).exceptionally(ex ->
+            "[DRY RUN] Player rollback preview for " + targetName + ": would restore balance to "
+                + String.format("%.2f", restoreTo)
+                + " (current balance unavailable: " + ex + "). No changes were applied.");
+    }
+
+    /**
+     * Dry-run preview for {@link #rollbackTimeframe}: lists each affected
+     * player with the balance they would be restored to and the delta, WITHOUT
+     * touching any balance. Read-only, so it does not take the rollback lock.
+     */
+    public CompletableFuture<String> dryRunRollbackTimeframe(long fromTimestamp, long toTimestamp) {
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(10000);
+        LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
+            RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
+        if (restorePerPlayer.isEmpty()) {
+            return CompletableFuture.completedFuture(
+                "[DRY RUN] No reversible actions in the timeframe - nothing would change.");
+        }
+        ArrayList<CompletableFuture<String>> lines = new ArrayList<CompletableFuture<String>>();
+        int[] index = new int[]{0};
+        for (Map.Entry<UUID, AuditDatabase.AuditEntry> restore : restorePerPlayer.entrySet()) {
+            UUID targetUuid = restore.getKey();
+            AuditDatabase.AuditEntry entry = restore.getValue();
+            final int playerNumber = ++index[0];
+            double restoreTo;
+            try {
+                restoreTo = Double.parseDouble(entry.beforeValue);
+            }
+            catch (NumberFormatException e) {
+                continue;
+            }
+            lines.add(SolidusIntegration.getBalance(targetUuid, entry.targetName).thenApply(current -> {
+                String line = "  " + playerNumber + ". " + entry.targetName
+                    + ": restore to " + String.format("%.2f", restoreTo);
+                if (current != null && Double.isFinite(current)) {
+                    line += " (current " + String.format("%.2f", current)
+                        + ", change " + String.format("%+.2f", restoreTo - current) + ")";
+                }
+                return line;
+            }).exceptionally(ex ->
+                "  " + playerNumber + ". " + entry.targetName
+                    + ": restore to " + String.format("%.2f", restoreTo) + " (current balance unavailable)"));
+        }
+        return CompletableFuture.allOf(lines.toArray(new CompletableFuture[0])).thenApply(v -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("[DRY RUN] Timeframe rollback preview: ").append(lines.size())
+                .append(" player(s) would be restored. No changes were applied.\n");
+            for (CompletableFuture<String> line : lines) {
+                sb.append(line.join()).append("\n");
+            }
+            return sb.toString().trim();
+        });
     }
 
     public List<AuditDatabase.AuditEntry> getTransactionTimeline(UUID targetUuid, int limit) {
