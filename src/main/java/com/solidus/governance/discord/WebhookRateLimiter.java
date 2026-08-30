@@ -25,9 +25,6 @@ public class WebhookRateLimiter {
         SolidusGovernanceMod.LOGGER.debug("WebhookRateLimiter initialized (5s rate limit, max 50 queued)");
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public CompletableFuture<Boolean> enqueue(Supplier<CompletableFuture<Boolean>> sendTask) {
         CompletableFuture<Boolean> future = new CompletableFuture<Boolean>();
         QueuedMessage msg = new QueuedMessage(sendTask, future);
@@ -44,9 +41,6 @@ public class WebhookRateLimiter {
         return future;
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     private void drainQueue() {
         QueuedMessage msg;
         Queue<QueuedMessage> queue = this.queue;
@@ -78,9 +72,6 @@ public class WebhookRateLimiter {
         }
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public void shutdown() {
         SolidusGovernanceMod.LOGGER.info("WebhookRateLimiter shutting down, flushing queue...");
         Queue<QueuedMessage> queue = this.queue;
@@ -110,9 +101,6 @@ public class WebhookRateLimiter {
         SolidusGovernanceMod.LOGGER.info("WebhookRateLimiter shut down complete.");
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public int getQueueSize() {
         Queue<QueuedMessage> queue = this.queue;
         synchronized (queue) {

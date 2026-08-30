@@ -1201,9 +1201,6 @@ public class GovernanceCommand {
         return 1;
     }
 
-    /*
-     * WARNING - void declaration
-     */
     private static int executeEventInfo(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         EventManager eventManager = engine.getEventManager();

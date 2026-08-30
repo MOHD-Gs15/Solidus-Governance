@@ -377,11 +377,6 @@ public class SimulationEngine {
         return -1;
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     private int tryJdbcAccountCount() {
         Path dbPath;
         MinecraftServer server = SolidusIntegration.getServer();

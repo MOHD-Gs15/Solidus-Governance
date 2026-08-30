@@ -137,9 +137,6 @@ public class PolicyDatabase {
         return policies;
     }
 
-    /*
-     * Enabled aggressive exception aggregation
-     */
     public boolean policyExists(String name) {
         if (!this.initialized) {
             return false;

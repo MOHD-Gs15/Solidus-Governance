@@ -260,11 +260,6 @@ public class AuditDatabase {
         return entries;
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public AuditEntry getAuditEntryById(int id) {
         if (!this.initialized) {
             return null;
@@ -351,11 +346,6 @@ public class AuditDatabase {
         });
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public boolean isAccountFrozen(UUID uuid) {
         if (!this.initialized) {
             return false;
@@ -517,11 +507,6 @@ public class AuditDatabase {
         });
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public TradingLockState loadTradingLockState() {
         if (!this.initialized) {
             return null;
@@ -543,11 +528,6 @@ public class AuditDatabase {
         return null;
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public PlayerStats getPlayerStats(UUID playerUuid, long fromTimestamp) {
         if (!this.initialized) {
             return null;
@@ -618,11 +598,6 @@ public class AuditDatabase {
         }
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public Long getFirstAuditTimestamp(UUID playerUuid) {
         if (!this.initialized) {
             return null;

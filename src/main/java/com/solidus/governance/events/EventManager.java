@@ -118,9 +118,6 @@ public class EventManager {
         });
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public void tickExpirations() {
         ArrayList<EconomyEvent> expired = new ArrayList<EconomyEvent>();
         Map<String, EconomyEvent> map = this.activeEvents;
@@ -149,9 +146,6 @@ public class EventManager {
         }
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public List<EconomyEvent> getActiveEvents() {
         Map<String, EconomyEvent> map = this.activeEvents;
         synchronized (map) {
@@ -159,9 +153,6 @@ public class EventManager {
         }
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public List<EconomyEvent> getAllEvents() {
         List<EconomyEvent> list = this.allEvents;
         synchronized (list) {
@@ -169,9 +160,6 @@ public class EventManager {
         }
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public EconomyEvent getEvent(String id) {
         Object object = this.activeEvents;
         synchronized (object) {
@@ -190,9 +178,6 @@ public class EventManager {
         return null;
     }
 
-    /*
-     * WARNING - Removed try catching itself - possible behaviour change.
-     */
     public void loadFromDatabase() {
         List<EconomyEvent> dbEvents = this.database.loadActiveEvents();
         long now = System.currentTimeMillis();

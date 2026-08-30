@@ -72,11 +72,6 @@ public class LimitsDatabase {
         }
     }
 
-    /*
-     * Enabled aggressive block sorting
-     * Enabled unnecessary exception pruning
-     * Enabled aggressive exception aggregation
-     */
     public DailyUsage loadDailyUsage(UUID playerUuid, String date) {
         if (!this.initialized) {
             return null;
