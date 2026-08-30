@@ -1,12 +1,10 @@
 package com.solidus.governance.commands;
 
 import com.mojang.brigadier.CommandDispatcher;
-import com.mojang.brigadier.arguments.ArgumentType;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
-import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.solidus.governance.SolidusGovernanceMod;
@@ -54,8 +52,324 @@ public class GovernanceCommand {
     private static final List<String> VALID_ACTION_TYPES = List.of("set_config", "enable_feature", "disable_feature", "activate_lockdown", "deactivate_lockdown", "increase_tax", "decrease_tax", "send_discord_alert");
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher, GovernanceEngine engine) {
-        dispatcher.register((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"governance").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).executes(context -> GovernanceCommand.executeStatus((CommandContext<CommandSourceStack>)context, engine))).then(((LiteralArgumentBuilder)Commands.literal((String)"license").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).executes(context -> GovernanceCommand.executeLicense((CommandContext<CommandSourceStack>)context, engine)))).then(((LiteralArgumentBuilder)Commands.literal((String)"fingerprint").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).executes(context -> GovernanceCommand.executeFingerprint((CommandContext<CommandSourceStack>)context)))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"intervention").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.literal((String)"add").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).then(Commands.argument((String)"amount", (ArgumentType)DoubleArgumentType.doubleArg((double)0.01)).executes(context -> GovernanceCommand.executeInterventionAdd((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"remove").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).then(Commands.argument((String)"amount", (ArgumentType)DoubleArgumentType.doubleArg((double)0.01)).executes(context -> GovernanceCommand.executeInterventionRemove((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"set").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).then(Commands.argument((String)"amount", (ArgumentType)DoubleArgumentType.doubleArg((double)0.0)).executes(context -> GovernanceCommand.executeInterventionSet((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"freeze").then(((RequiredArgumentBuilder)Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeFreeze((CommandContext<CommandSourceStack>)context, engine, 0))).then(Commands.argument((String)"duration", (ArgumentType)IntegerArgumentType.integer((int)0)).executes(context -> GovernanceCommand.executeFreeze((CommandContext<CommandSourceStack>)context, engine, IntegerArgumentType.getInteger((CommandContext)context, (String)"duration"))))))).then(Commands.literal((String)"unfreeze").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeUnfreeze((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"suspicious").then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executeSuspiciousList((CommandContext<CommandSourceStack>)context, engine)))).then(Commands.literal((String)"mark").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).then(Commands.argument((String)"reason", (ArgumentType)MessageArgument.message()).executes(context -> GovernanceCommand.executeSuspiciousMark((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"unmark").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeSuspiciousUnmark((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"lock").then(Commands.argument((String)"reason", (ArgumentType)MessageArgument.message()).executes(context -> GovernanceCommand.executeLockTrading((CommandContext<CommandSourceStack>)context, engine, true))))).then(Commands.literal((String)"unlock").executes(context -> GovernanceCommand.executeLockTrading((CommandContext<CommandSourceStack>)context, engine, false))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"tax").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.literal((String)"rates").executes(context -> GovernanceCommand.executeTaxRates((CommandContext<CommandSourceStack>)context, engine)))).then(Commands.literal((String)"set").then(Commands.argument((String)"type", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"rate", (ArgumentType)DoubleArgumentType.doubleArg((double)0.0, (double)1.0)).executes(context -> GovernanceCommand.executeTaxSet((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"brackets").then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executeBracketsList((CommandContext<CommandSourceStack>)context, engine)))).then(Commands.literal((String)"add").then(Commands.argument((String)"threshold", (ArgumentType)DoubleArgumentType.doubleArg((double)0.0)).then(Commands.argument((String)"rate", (ArgumentType)DoubleArgumentType.doubleArg((double)0.0, (double)1.0)).executes(context -> GovernanceCommand.executeBracketAdd((CommandContext<CommandSourceStack>)context, engine)))))).then(Commands.literal((String)"remove").then(Commands.argument((String)"threshold", (ArgumentType)DoubleArgumentType.doubleArg((double)0.0)).executes(context -> GovernanceCommand.executeBracketRemove((CommandContext<CommandSourceStack>)context, engine))))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"audit").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).then(((LiteralArgumentBuilder)Commands.literal((String)"export").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(((LiteralArgumentBuilder)Commands.literal((String)"csv").executes(context -> GovernanceCommand.executeAuditExport((CommandContext<CommandSourceStack>)context, engine, 7))).then(Commands.argument((String)"days", (ArgumentType)IntegerArgumentType.integer((int)1, (int)365)).executes(context -> GovernanceCommand.executeAuditExport((CommandContext<CommandSourceStack>)context, engine, IntegerArgumentType.getInteger((CommandContext)context, (String)"days")))))).then(((LiteralArgumentBuilder)Commands.literal((String)"recent").executes(context -> GovernanceCommand.executeAuditRecent((CommandContext<CommandSourceStack>)context, engine, 10))).then(Commands.argument((String)"count", (ArgumentType)IntegerArgumentType.integer((int)1, (int)50)).executes(context -> GovernanceCommand.executeAuditRecent((CommandContext<CommandSourceStack>)context, engine, IntegerArgumentType.getInteger((CommandContext)context, (String)"count")))))).then(((LiteralArgumentBuilder)Commands.literal((String)"search").then(Commands.literal((String)"player").then(Commands.argument((String)"query", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeAuditSearch((CommandContext<CommandSourceStack>)context, engine, "player"))))).then(Commands.literal((String)"category").then(Commands.argument((String)"query", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeAuditSearch((CommandContext<CommandSourceStack>)context, engine, "category"))))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"recovery").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(((LiteralArgumentBuilder)Commands.literal((String)"snapshot").then(((LiteralArgumentBuilder)Commands.literal((String)"create").executes(context -> GovernanceCommand.executeSnapshotCreate((CommandContext<CommandSourceStack>)context, engine, null))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeSnapshotCreate((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"name")))))).then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executeSnapshotList((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"rollback").then(Commands.argument((String)"auditId", (ArgumentType)IntegerArgumentType.integer((int)1)).executes(context -> GovernanceCommand.executeRollback((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"dryrun").then(Commands.argument((String)"auditId", (ArgumentType)IntegerArgumentType.integer((int)1)).executes(context -> GovernanceCommand.executeDryRun((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"timeline").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeTimeline((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"automation").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.literal((String)"status").executes(context -> GovernanceCommand.executeAutomationStatus((CommandContext<CommandSourceStack>)context, engine)))).then(((LiteralArgumentBuilder)Commands.literal((String)"lockdown").then(Commands.literal((String)"activate").then(Commands.argument((String)"reason", (ArgumentType)MessageArgument.message()).executes(context -> GovernanceCommand.executeLockdown((CommandContext<CommandSourceStack>)context, engine, true))))).then(Commands.literal((String)"deactivate").executes(context -> GovernanceCommand.executeLockdown((CommandContext<CommandSourceStack>)context, engine, false)))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"limits").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).executes(context -> GovernanceCommand.executeLimitsStatus((CommandContext<CommandSourceStack>)context, engine))).then(((LiteralArgumentBuilder)Commands.literal((String)"set").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"type", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"value", (ArgumentType)DoubleArgumentType.doubleArg((double)-1.0)).executes(context -> GovernanceCommand.executeLimitsSet((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"reset").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeLimitsReset((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"status").then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeLimitsPlayerStatus((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"discord").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).executes(context -> GovernanceCommand.executeDiscordStatus((CommandContext<CommandSourceStack>)context, engine))).then(((LiteralArgumentBuilder)Commands.literal((String)"set").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"category", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"url", (ArgumentType)StringArgumentType.greedyString()).executes(context -> GovernanceCommand.executeDiscordSet((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"remove").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"category", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeDiscordRemove((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"test").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).executes(context -> GovernanceCommand.executeDiscordTest((CommandContext<CommandSourceStack>)context, engine, null))).then(Commands.argument((String)"category", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeDiscordTest((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"category"))))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"event").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executeEventList((CommandContext<CommandSourceStack>)context, engine)))).then(((LiteralArgumentBuilder)Commands.literal((String)"create").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"type", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.greedyString()).executes(context -> GovernanceCommand.executeEventCreate((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"cancel").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"id", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeEventCancel((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"info").then(Commands.argument((String)"id", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeEventInfo((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"history").executes(context -> GovernanceCommand.executeEventHistory((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)Commands.literal((String)"profile").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).then(Commands.argument((String)"player", (ArgumentType)EntityArgument.player()).executes(context -> GovernanceCommand.executeProfile((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"policy").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executePolicyList((CommandContext<CommandSourceStack>)context, engine)))).then(((LiteralArgumentBuilder)Commands.literal((String)"save").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(((RequiredArgumentBuilder)Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicySave((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"name"), null, null))).then(((RequiredArgumentBuilder)Commands.argument((String)"displayName", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicySave((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"name"), StringArgumentType.getString((CommandContext)context, (String)"displayName"), null))).then(Commands.argument((String)"description", (ArgumentType)StringArgumentType.greedyString()).executes(context -> GovernanceCommand.executePolicySave((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"name"), StringArgumentType.getString((CommandContext)context, (String)"displayName"), StringArgumentType.getString((CommandContext)context, (String)"description")))))))).then(((LiteralArgumentBuilder)Commands.literal((String)"load").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicyLoad((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"preview").then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicyPreview((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)Commands.literal((String)"delete").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicyDelete((CommandContext<CommandSourceStack>)context, engine))))).then(Commands.literal((String)"info").then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executePolicyInfo((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"rules").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).then(Commands.literal((String)"list").executes(context -> GovernanceCommand.executeRulesList((CommandContext<CommandSourceStack>)context, engine)))).then(Commands.literal((String)"info").then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleInfo((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)Commands.literal((String)"add").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"cooldown", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleAdd((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"enable").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleToggle((CommandContext<CommandSourceStack>)context, engine, true))))).then(((LiteralArgumentBuilder)Commands.literal((String)"disable").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleToggle((CommandContext<CommandSourceStack>)context, engine, false))))).then(((LiteralArgumentBuilder)Commands.literal((String)"delete").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"name", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleDelete((CommandContext<CommandSourceStack>)context, engine))))).then(((LiteralArgumentBuilder)Commands.literal((String)"add-condition").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"rule", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"type", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"value", (ArgumentType)DoubleArgumentType.doubleArg()).executes(context -> GovernanceCommand.executeRuleAddCondition((CommandContext<CommandSourceStack>)context, engine))))))).then(((LiteralArgumentBuilder)Commands.literal((String)"add-action").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"rule", (ArgumentType)StringArgumentType.word()).then(((RequiredArgumentBuilder)Commands.argument((String)"type", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleAddAction((CommandContext<CommandSourceStack>)context, engine, null, null))).then(((RequiredArgumentBuilder)Commands.argument((String)"key", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleAddAction((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"key"), null))).then(Commands.argument((String)"value", (ArgumentType)StringArgumentType.greedyString()).executes(context -> GovernanceCommand.executeRuleAddAction((CommandContext<CommandSourceStack>)context, engine, StringArgumentType.getString((CommandContext)context, (String)"key"), StringArgumentType.getString((CommandContext)context, (String)"value"))))))))).then(((LiteralArgumentBuilder)Commands.literal((String)"remove-condition").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"rule", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"index", (ArgumentType)IntegerArgumentType.integer((int)0)).executes(context -> GovernanceCommand.executeRuleRemoveCondition((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"remove-action").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"rule", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"index", (ArgumentType)IntegerArgumentType.integer((int)0)).executes(context -> GovernanceCommand.executeRuleRemoveAction((CommandContext<CommandSourceStack>)context, engine)))))).then(((LiteralArgumentBuilder)Commands.literal((String)"set-cooldown").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).then(Commands.argument((String)"rule", (ArgumentType)StringArgumentType.word()).then(Commands.argument((String)"duration", (ArgumentType)StringArgumentType.word()).executes(context -> GovernanceCommand.executeRuleSetCooldown((CommandContext<CommandSourceStack>)context, engine))))))).then(((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"simulation").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.ADMINS)))).executes(context -> GovernanceCommand.executeSimulationStatus((CommandContext<CommandSourceStack>)context, engine))).then(Commands.literal((String)"true").executes(context -> GovernanceCommand.executeSimulationToggle((CommandContext<CommandSourceStack>)context, engine, true)))).then(Commands.literal((String)"false").executes(context -> GovernanceCommand.executeSimulationToggle((CommandContext<CommandSourceStack>)context, engine, false)))).then(Commands.literal((String)"insight").executes(context -> GovernanceCommand.executeSimulationInsight((CommandContext<CommandSourceStack>)context, engine)))).then(Commands.literal((String)"refresh").executes(context -> GovernanceCommand.executeSimulationRefresh((CommandContext<CommandSourceStack>)context, engine)))));
-        dispatcher.register((LiteralArgumentBuilder)((LiteralArgumentBuilder)((LiteralArgumentBuilder)Commands.literal((String)"gov").requires(source -> source.permissions().hasPermission((Permission)new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))).executes(context -> GovernanceCommand.executeStatus((CommandContext<CommandSourceStack>)context, engine))).redirect(dispatcher.getRoot().getChild("governance")));
+        dispatcher.register(Commands.literal("governance")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .executes(context -> executeStatus(context, engine))
+            .then(Commands.literal("license")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .executes(context -> executeLicense(context, engine)))
+            .then(Commands.literal("fingerprint")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .executes(context -> executeFingerprint(context)))
+            .then(buildIntervention(engine))
+            .then(buildTax(engine))
+            .then(buildAudit(engine))
+            .then(buildRecovery(engine))
+            .then(buildAutomation(engine))
+            .then(buildLimits(engine))
+            .then(buildDiscord(engine))
+            .then(buildEvent(engine))
+            .then(buildProfile(engine))
+            .then(buildPolicy(engine))
+            .then(buildRules(engine))
+            .then(buildSimulation(engine)));
+
+        // /gov alias - redirects every sub-command to /governance
+        dispatcher.register(Commands.literal("gov")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .executes(context -> executeStatus(context, engine))
+            .redirect(dispatcher.getRoot().getChild("governance")));
+    }
+
+    // ===========================================================
+    //  Command tree builders - one method per command family so
+    //  each sub-tree stays readable and future sub-commands are a
+    //  local edit instead of surgery on a single expression.
+    //  Behavior is identical to the previous single-expression
+    //  tree; the shape is pinned by CommandTreeShapeTest.
+    // ===========================================================
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildIntervention(GovernanceEngine engine) {
+        return Commands.literal("intervention")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+            .then(Commands.literal("add")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .then(Commands.argument("amount", DoubleArgumentType.doubleArg(0.01))
+                        .executes(context -> executeInterventionAdd(context, engine)))))
+            .then(Commands.literal("remove")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .then(Commands.argument("amount", DoubleArgumentType.doubleArg(0.01))
+                        .executes(context -> executeInterventionRemove(context, engine)))))
+            .then(Commands.literal("set")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .then(Commands.argument("amount", DoubleArgumentType.doubleArg(0.0))
+                        .executes(context -> executeInterventionSet(context, engine)))))
+            .then(Commands.literal("freeze")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .executes(context -> executeFreeze(context, engine, 0))
+                    .then(Commands.argument("duration", IntegerArgumentType.integer(0))
+                        .executes(context -> executeFreeze(context, engine, IntegerArgumentType.getInteger(context, "duration"))))))
+            .then(Commands.literal("unfreeze")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .executes(context -> executeUnfreeze(context, engine))))
+            .then(Commands.literal("suspicious")
+                .then(Commands.literal("list")
+                    .executes(context -> executeSuspiciousList(context, engine)))
+                .then(Commands.literal("mark")
+                    .then(Commands.argument("player", EntityArgument.player())
+                        .then(Commands.argument("reason", MessageArgument.message())
+                            .executes(context -> executeSuspiciousMark(context, engine)))))
+                .then(Commands.literal("unmark")
+                    .then(Commands.argument("player", EntityArgument.player())
+                        .executes(context -> executeSuspiciousUnmark(context, engine)))))
+            .then(Commands.literal("lock")
+                .then(Commands.argument("reason", MessageArgument.message())
+                    .executes(context -> executeLockTrading(context, engine, true))))
+            .then(Commands.literal("unlock")
+                .executes(context -> executeLockTrading(context, engine, false)));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildTax(GovernanceEngine engine) {
+        return Commands.literal("tax")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+            .then(Commands.literal("rates")
+                .executes(context -> executeTaxRates(context, engine)))
+            .then(Commands.literal("set")
+                .then(Commands.argument("type", StringArgumentType.word())
+                    .then(Commands.argument("rate", DoubleArgumentType.doubleArg(0.0, 1.0))
+                        .executes(context -> executeTaxSet(context, engine)))))
+            .then(Commands.literal("brackets")
+                .then(Commands.literal("list")
+                    .executes(context -> executeBracketsList(context, engine)))
+                .then(Commands.literal("add")
+                    .then(Commands.argument("threshold", DoubleArgumentType.doubleArg(0.0))
+                        .then(Commands.argument("rate", DoubleArgumentType.doubleArg(0.0, 1.0))
+                            .executes(context -> executeBracketAdd(context, engine)))))
+                .then(Commands.literal("remove")
+                    .then(Commands.argument("threshold", DoubleArgumentType.doubleArg(0.0))
+                        .executes(context -> executeBracketRemove(context, engine)))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildAudit(GovernanceEngine engine) {
+        return Commands.literal("audit")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .then(Commands.literal("export")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.literal("csv")
+                    .executes(context -> executeAuditExport(context, engine, 7))
+                    .then(Commands.argument("days", IntegerArgumentType.integer(1, 365))
+                        .executes(context -> executeAuditExport(context, engine, IntegerArgumentType.getInteger(context, "days"))))))
+            .then(Commands.literal("recent")
+                .executes(context -> executeAuditRecent(context, engine, 10))
+                .then(Commands.argument("count", IntegerArgumentType.integer(1, 50))
+                    .executes(context -> executeAuditRecent(context, engine, IntegerArgumentType.getInteger(context, "count")))))
+            .then(Commands.literal("search")
+                .then(Commands.literal("player")
+                    .then(Commands.argument("query", EntityArgument.player())
+                        .executes(context -> executeAuditSearch(context, engine, "player"))))
+                .then(Commands.literal("category")
+                    .then(Commands.argument("query", StringArgumentType.word())
+                        .executes(context -> executeAuditSearch(context, engine, "category")))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRecovery(GovernanceEngine engine) {
+        return Commands.literal("recovery")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+            .then(Commands.literal("snapshot")
+                .then(Commands.literal("create")
+                    .executes(context -> executeSnapshotCreate(context, engine, null))
+                    .then(Commands.argument("name", StringArgumentType.word())
+                        .executes(context -> executeSnapshotCreate(context, engine, StringArgumentType.getString(context, "name")))))
+                .then(Commands.literal("list")
+                    .executes(context -> executeSnapshotList(context, engine))))
+            .then(Commands.literal("rollback")
+                .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
+                    .executes(context -> executeRollback(context, engine))))
+            .then(Commands.literal("dryrun")
+                .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
+                    .executes(context -> executeDryRun(context, engine))))
+            .then(Commands.literal("timeline")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .executes(context -> executeTimeline(context, engine))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildAutomation(GovernanceEngine engine) {
+        return Commands.literal("automation")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+            .then(Commands.literal("status")
+                .executes(context -> executeAutomationStatus(context, engine)))
+            .then(Commands.literal("lockdown")
+                .then(Commands.literal("activate")
+                    .then(Commands.argument("reason", MessageArgument.message())
+                        .executes(context -> executeLockdown(context, engine, true))))
+                .then(Commands.literal("deactivate")
+                    .executes(context -> executeLockdown(context, engine, false))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildLimits(GovernanceEngine engine) {
+        return Commands.literal("limits")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .executes(context -> executeLimitsStatus(context, engine))
+            .then(Commands.literal("set")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("type", StringArgumentType.word())
+                    .then(Commands.argument("value", DoubleArgumentType.doubleArg(-1.0))
+                        .executes(context -> executeLimitsSet(context, engine)))))
+            .then(Commands.literal("reset")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("player", EntityArgument.player())
+                    .executes(context -> executeLimitsReset(context, engine))))
+            .then(Commands.literal("status")
+                .then(Commands.argument("player", EntityArgument.player())
+                    .executes(context -> executeLimitsPlayerStatus(context, engine))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildDiscord(GovernanceEngine engine) {
+        return Commands.literal("discord")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .executes(context -> executeDiscordStatus(context, engine))
+            .then(Commands.literal("set")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("category", StringArgumentType.word())
+                    .then(Commands.argument("url", StringArgumentType.greedyString())
+                        .executes(context -> executeDiscordSet(context, engine)))))
+            .then(Commands.literal("remove")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("category", StringArgumentType.word())
+                    .executes(context -> executeDiscordRemove(context, engine))))
+            .then(Commands.literal("test")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .executes(context -> executeDiscordTest(context, engine, null))
+                .then(Commands.argument("category", StringArgumentType.word())
+                    .executes(context -> executeDiscordTest(context, engine, StringArgumentType.getString(context, "category")))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildEvent(GovernanceEngine engine) {
+        return Commands.literal("event")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .then(Commands.literal("list")
+                .executes(context -> executeEventList(context, engine)))
+            .then(Commands.literal("create")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("type", StringArgumentType.word())
+                    .then(Commands.argument("name", StringArgumentType.greedyString())
+                        .executes(context -> executeEventCreate(context, engine)))))
+            .then(Commands.literal("cancel")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("id", StringArgumentType.word())
+                    .executes(context -> executeEventCancel(context, engine))))
+            .then(Commands.literal("info")
+                .then(Commands.argument("id", StringArgumentType.word())
+                    .executes(context -> executeEventInfo(context, engine))))
+            .then(Commands.literal("history")
+                .executes(context -> executeEventHistory(context, engine)));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildProfile(GovernanceEngine engine) {
+        return Commands.literal("profile")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .then(Commands.argument("player", EntityArgument.player())
+                .executes(context -> executeProfile(context, engine)));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildPolicy(GovernanceEngine engine) {
+        return Commands.literal("policy")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .then(Commands.literal("list")
+                .executes(context -> executePolicyList(context, engine)))
+            .then(Commands.literal("save")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executePolicySave(context, engine, StringArgumentType.getString(context, "name"), null, null))
+                    .then(Commands.argument("displayName", StringArgumentType.word())
+                        .executes(context -> executePolicySave(context, engine, StringArgumentType.getString(context, "name"), StringArgumentType.getString(context, "displayName"), null))
+                        .then(Commands.argument("description", StringArgumentType.greedyString())
+                            .executes(context -> executePolicySave(context, engine, StringArgumentType.getString(context, "name"), StringArgumentType.getString(context, "displayName"), StringArgumentType.getString(context, "description")))))))
+            .then(Commands.literal("load")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executePolicyLoad(context, engine))))
+            .then(Commands.literal("preview")
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executePolicyPreview(context, engine))))
+            .then(Commands.literal("delete")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executePolicyDelete(context, engine))))
+            .then(Commands.literal("info")
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executePolicyInfo(context, engine))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildRules(GovernanceEngine engine) {
+        return Commands.literal("rules")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+            .then(Commands.literal("list")
+                .executes(context -> executeRulesList(context, engine)))
+            .then(Commands.literal("info")
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executeRuleInfo(context, engine))))
+            .then(Commands.literal("add")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .then(Commands.argument("cooldown", StringArgumentType.word())
+                        .executes(context -> executeRuleAdd(context, engine)))))
+            .then(Commands.literal("enable")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executeRuleToggle(context, engine, true))))
+            .then(Commands.literal("disable")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executeRuleToggle(context, engine, false))))
+            .then(Commands.literal("delete")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("name", StringArgumentType.word())
+                    .executes(context -> executeRuleDelete(context, engine))))
+            .then(Commands.literal("add-condition")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("rule", StringArgumentType.word())
+                    .then(Commands.argument("type", StringArgumentType.word())
+                        .then(Commands.argument("value", DoubleArgumentType.doubleArg())
+                            .executes(context -> executeRuleAddCondition(context, engine))))))
+            .then(Commands.literal("add-action")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("rule", StringArgumentType.word())
+                    .then(Commands.argument("type", StringArgumentType.word())
+                        .executes(context -> executeRuleAddAction(context, engine, null, null))
+                        .then(Commands.argument("key", StringArgumentType.word())
+                            .executes(context -> executeRuleAddAction(context, engine, StringArgumentType.getString(context, "key"), null))
+                            .then(Commands.argument("value", StringArgumentType.greedyString())
+                                .executes(context -> executeRuleAddAction(context, engine, StringArgumentType.getString(context, "key"), StringArgumentType.getString(context, "value"))))))))
+            .then(Commands.literal("remove-condition")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("rule", StringArgumentType.word())
+                    .then(Commands.argument("index", IntegerArgumentType.integer(0))
+                        .executes(context -> executeRuleRemoveCondition(context, engine)))))
+            .then(Commands.literal("remove-action")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("rule", StringArgumentType.word())
+                    .then(Commands.argument("index", IntegerArgumentType.integer(0))
+                        .executes(context -> executeRuleRemoveAction(context, engine)))))
+            .then(Commands.literal("set-cooldown")
+                .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                .then(Commands.argument("rule", StringArgumentType.word())
+                    .then(Commands.argument("duration", StringArgumentType.word())
+                        .executes(context -> executeRuleSetCooldown(context, engine)))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> buildSimulation(GovernanceEngine engine) {
+        return Commands.literal("simulation")
+            .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+            .executes(context -> executeSimulationStatus(context, engine))
+            .then(Commands.literal("true")
+                .executes(context -> executeSimulationToggle(context, engine, true)))
+            .then(Commands.literal("false")
+                .executes(context -> executeSimulationToggle(context, engine, false)))
+            .then(Commands.literal("insight")
+                .executes(context -> executeSimulationInsight(context, engine)))
+            .then(Commands.literal("refresh")
+                .executes(context -> executeSimulationRefresh(context, engine)));
     }
 
     private static int executeStatus(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
