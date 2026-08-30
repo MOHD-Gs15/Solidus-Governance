@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p><b>Enforcement matrix (when registered):</b></p>
  * <table border="1">
  *   <tr><th>Hook point</th><th>Vetoes</th><th>After settlement</th></tr>
- *   <tr><td>allowTransfer</td><td>trading lock, frozen sender, transfer limits</td><td>recordTransfer + transfer tax (sender) + progressive bracket tax (sender, if brackets configured)</td></tr>
+ *   <tr><td>allowTransfer</td><td>trading lock, frozen sender, transfer limits, frozen receiver</td><td>transfer tax (sender) + progressive bracket tax (sender, if brackets configured)</td></tr>
  *   <tr><td>allowAuctionListing</td><td>trading lock, frozen seller, auction limit</td><td>recordAuctionListing</td></tr>
  *   <tr><td>allowAuctionPurchase</td><td>trading lock, frozen buyer</td><td>auction tax (seller, at sale)</td></tr>
  *   <tr><td>allowShopPurchase</td><td>trading lock, frozen buyer</td><td>shop tax (buyer)</td></tr>
@@ -54,6 +54,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Tax collection honors the {@code taxation.enabled} master switch and
  * each component self-gates on premium (limits are premium; freezes, locks,
  * and taxes are free).</p>
+ *
+ * <p><b>Failure policy (fail-closed):</b> if a veto hook throws, the hook
+ * answers with a generic denial instead of letting Core's fail-open dispatch
+ * wave the transaction through - a governance component that cannot answer
+ * must not silently lift freezes, trading locks, or daily limits. Configure
+ * {@code enforcement.fail-closed=false} to deliberately restore fail-open
+ * behavior. Post-settlement notification hooks ({@code afterXxx}) keep
+ * failing open: recording/tax failures must never corrupt settled state.</p>
  *
  * @since 1.2.0
  */
@@ -197,11 +205,16 @@ public final class CoreHookBridge {
                     case "allowTransfer": {
                         // (senderUuid, senderName, receiverUuid, receiverName, amount)
                         UUID sender = (UUID) args[0];
+                        UUID receiver = (UUID) args[2];
                         double amount = (Double) args[4];
                         Object decision = vetoTrading(sender);
                         if (decision != null) return decision;
                         Object limit = vetoTransferLimit(sender, amount);
                         if (limit != null) return limit;
+                        // A freeze is an asset freeze, not just a spending ban:
+                        // a frozen account must not be able to receive funds.
+                        Object receiverFrozen = vetoReceiverFrozen(receiver);
+                        if (receiverFrozen != null) return receiverFrozen;
                         return allowDecision;
                     }
                     case "allowAuctionListing": {
@@ -288,9 +301,30 @@ public final class CoreHookBridge {
                         return null;
                 }
             } catch (Throwable t) {
-                // Fail-open, matching Core's dispatch policy: a throwing hook
-                // must never wedge the economy. Vetoes that threw were not
-                // expressed as denials, so the transaction proceeds.
+                boolean isVeto = name.startsWith("allow");
+                boolean failClosed = true;
+                try {
+                    failClosed = engine.getConfig().getBool("enforcement.fail-closed", true);
+                } catch (Throwable ignored) {
+                    // Config unavailable: keep the safe default (fail-closed).
+                }
+                if (isVeto && failClosed) {
+                    // Fail CLOSED: an explicit denial is final for Core, so the
+                    // economy stays protected even when Governance cannot answer.
+                    SolidusGovernanceMod.LOGGER.error(
+                        "CoreHookBridge: veto hook {} threw - failing CLOSED (enforcement.fail-closed=true). {}",
+                        name, t.toString());
+                    try {
+                        return deny(GENERIC_DENY);
+                    } catch (Throwable denyFailure) {
+                        SolidusGovernanceMod.LOGGER.error(
+                            "CoreHookBridge: constructing a denial failed: {}", denyFailure.toString());
+                        return genericDefault(method);
+                    }
+                }
+                // Notification hooks (afterXxx) and fail-closed-opted-out servers:
+                // post-settlement recording/tax failures must never corrupt the
+                // already-committed state, so these fail open.
                 SolidusGovernanceMod.LOGGER.warn(
                     "CoreHookBridge: hook method {} threw - failing open. {}", name, t.toString());
                 return genericDefault(method);
@@ -317,6 +351,15 @@ public final class CoreHookBridge {
             TransactionLimits limits = engine.getTransactionLimits();
             if (limits != null && !limits.checkTransferLimit(sender, amount)) {
                 return deny("Transfer denied: daily transaction limit reached.");
+            }
+            return null;
+        }
+
+        /** Frozen receivers cannot receive funds (asset freeze, not just a spending ban). */
+        private Object vetoReceiverFrozen(UUID receiver) throws Exception {
+            AccountFreezer freezer = engine.getAccountFreezer();
+            if (freezer != null && receiver != null && freezer.isFrozen(receiver)) {
+                return deny("The receiving account is frozen by server administrators.");
             }
             return null;
         }
