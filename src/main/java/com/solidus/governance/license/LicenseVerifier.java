@@ -5,18 +5,45 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+
 import net.fabricmc.loader.api.FabricLoader;
 
+/**
+ * LicenseVerifier - offline Ed25519 license verification (key format SA2).
+ *
+ * <p><b>Why SA2 exists:</b> SA1 keys were signed with HMAC-SHA256 using a
+ * secret that had to be present on every customer server via the
+ * {@code SOLIDUS_LICENSE_SECRET} environment variable. Because that secret
+ * shipped to the very party being verified, any buyer could mint unlimited
+ * valid keys offline. SA2 replaces the symmetric scheme with an asymmetric
+ * Ed25519 signature: the private key never leaves the issuer's machine and
+ * customers only receive the public verification key, which cannot sign.</p>
+ *
+ * <p><b>Key format:</b> {@code SA2-<base64(payload)>-<base64(Ed25519 signature)>}<br>
+ * <b>Payload:</b> {@code 2|<licensee>|<expiry ISO-8601>|<fingerprint or ANY>}<br>
+ * <b>Public key:</b> base64(X.509 SubjectPublicKeyInfo) provided via the
+ * {@code SOLIDUS_LICENSE_PUBLIC_KEY} environment variable (or the
+ * {@code solidus.license.publicKey} system property, mainly for tests).<br>
+ * <b>Issuer tool:</b> {@code tools/LicenseIssuer.java} in the repository.</p>
+ *
+ * <p>SA1 keys are rejected outright: they were forgeable by design and there
+ * is no safe way to honor them.</p>
+ */
 public class LicenseVerifier {
-    private static final String VERSION_PREFIX = "SA1";
-    private static final String LICENSE_SECRET_ENV = "SOLIDUS_LICENSE_SECRET";
+    public static final String KEY_PREFIX = "SA2";
+    public static final int PAYLOAD_VERSION = 2;
+    public static final String PUBLIC_KEY_ENV = "SOLIDUS_LICENSE_PUBLIC_KEY";
+    public static final String PUBLIC_KEY_PROPERTY = "solidus.license.publicKey";
+
     private volatile VerificationState state = VerificationState.UNVERIFIED;
     private volatile String licenseeName;
     private volatile LocalDate expiryDate;
@@ -32,8 +59,7 @@ public class LicenseVerifier {
         try {
             String key = Files.readString(licenseKeyPath).trim();
             this.verifyKey(key);
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             this.state = VerificationState.INVALID;
             this.errorMessage = "Failed to read license key: " + e.getMessage();
         }
@@ -41,34 +67,57 @@ public class LicenseVerifier {
 
     public void verifyKey(String key) {
         try {
-            String serverFp;
-            byte[] signatureBytes;
             if (key == null || key.isBlank()) {
                 this.state = VerificationState.INVALID;
                 this.errorMessage = "Empty license key";
                 return;
             }
-            String[] parts = key.split("-");
-            if (parts.length != 3 || !VERSION_PREFIX.equals(parts[0])) {
+            if (!key.startsWith(KEY_PREFIX + "-")) {
                 this.state = VerificationState.INVALID;
-                this.errorMessage = "Invalid license key format";
+                this.errorMessage = "Invalid license key format. Expected " + KEY_PREFIX + "-... "
+                    + "(SA1 keys are no longer accepted - they were forgeable by design; request a new SA2 key)";
                 return;
             }
-            byte[] payloadBytes = Base64.getDecoder().decode(parts[1]);
-            String payload = new String(payloadBytes, StandardCharsets.UTF_8);
-            if (!this.verifyHMAC(payload, signatureBytes = Base64.getDecoder().decode(parts[2]))) {
+            String body = key.substring(KEY_PREFIX.length() + 1);
+            int lastDash = body.lastIndexOf('-');
+            if (lastDash < 0) {
                 this.state = VerificationState.INVALID;
-                this.errorMessage = "Invalid license signature";
+                this.errorMessage = "Invalid license key structure (missing signature separator)";
+                return;
+            }
+            String payloadBase64 = body.substring(0, lastDash);
+            String signatureBase64 = body.substring(lastDash + 1);
+            String payload;
+            byte[] signatureBytes;
+            try {
+                payload = new String(Base64.getDecoder().decode(payloadBase64), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                this.state = VerificationState.INVALID;
+                this.errorMessage = "Invalid key encoding (payload not valid Base64)";
+                return;
+            }
+            try {
+                signatureBytes = Base64.getDecoder().decode(signatureBase64);
+            } catch (IllegalArgumentException e) {
+                this.state = VerificationState.INVALID;
+                this.errorMessage = "Invalid key encoding (signature not valid Base64)";
+                return;
+            }
+            if (!this.verifySignature(payload, signatureBytes)) {
+                if (this.errorMessage == null) {
+                    this.errorMessage = "Invalid license signature";
+                }
+                this.state = VerificationState.INVALID;
                 return;
             }
             String[] fields = payload.split("\\|");
-            if (fields.length < 4) {
+            if (fields.length != 4) {
                 this.state = VerificationState.INVALID;
-                this.errorMessage = "Invalid payload structure";
+                this.errorMessage = "Invalid payload structure (expected 4 fields, got " + fields.length + ")";
                 return;
             }
             String version = fields[0];
-            if (!VERSION_PREFIX.equals(version)) {
+            if (!String.valueOf(PAYLOAD_VERSION).equals(version)) {
                 this.state = VerificationState.INVALID;
                 this.errorMessage = "Unsupported license version: " + version;
                 return;
@@ -76,75 +125,82 @@ public class LicenseVerifier {
             this.licenseeName = fields[1];
             try {
                 this.expiryDate = LocalDate.parse(fields[2], DateTimeFormatter.ISO_LOCAL_DATE);
-            }
-            catch (DateTimeParseException e) {
+            } catch (DateTimeParseException e) {
                 this.state = VerificationState.INVALID;
                 this.errorMessage = "Invalid expiry date in license";
                 return;
             }
             if (this.expiryDate.isBefore(LocalDate.now())) {
                 this.state = VerificationState.EXPIRED;
-                this.errorMessage = "License expired on " + String.valueOf(this.expiryDate);
+                this.errorMessage = "License expired on " + this.expiryDate;
                 return;
             }
             this.fingerprint = fields[3];
-            if (!"ANY".equals(this.fingerprint) && !this.fingerprint.equals(serverFp = LicenseVerifier.computeServerFingerprint())) {
+            if (!"ANY".equals(this.fingerprint) && !this.fingerprint.equals(computeServerFingerprint())) {
                 this.state = VerificationState.FINGERPRINT_MISMATCH;
                 this.errorMessage = "License bound to a different server";
                 return;
             }
             this.state = VerificationState.VERIFIED;
             this.errorMessage = null;
-        }
-        catch (Exception e) {
+        } catch (Exception e) {
             this.state = VerificationState.INVALID;
             this.errorMessage = "License verification error: " + e.getMessage();
         }
     }
 
-    private boolean verifyHMAC(String payload, byte[] expectedSignature) {
-        String secret = System.getenv(LICENSE_SECRET_ENV);
-        if (secret == null || secret.isBlank()) {
-            this.errorMessage = LICENSE_SECRET_ENV + " is not configured; premium verification is disabled.";
+    /**
+     * Verifies the Ed25519 signature over the payload using the configured
+     * public key. Fail-closed: a missing or malformed public key disables
+     * premium verification entirely rather than trusting the key.
+     */
+    private boolean verifySignature(String payload, byte[] providedSignature) {
+        byte[] publicKeyBytes = getPublicKeyBytes();
+        if (publicKeyBytes == null) {
+            this.errorMessage = PUBLIC_KEY_ENV + " is not configured "
+                + "(base64 X.509 Ed25519 public key); premium verification is disabled.";
             return false;
         }
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] computed = mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
-            return LicenseVerifier.constantTimeEquals(computed, expectedSignature);
-        }
-        catch (Exception e) {
+            PublicKey publicKey = KeyFactory.getInstance("Ed25519")
+                .generatePublic(new X509EncodedKeySpec(publicKeyBytes));
+            Signature verifier = Signature.getInstance("Ed25519");
+            verifier.initVerify(publicKey);
+            verifier.update(payload.getBytes(StandardCharsets.UTF_8));
+            return verifier.verify(providedSignature);
+        } catch (Exception e) {
             return false;
         }
     }
 
-    private static boolean constantTimeEquals(byte[] a, byte[] b) {
-        if (a.length != b.length) {
-            return false;
+    private static byte[] getPublicKeyBytes() {
+        String encoded = System.getProperty(PUBLIC_KEY_PROPERTY);
+        if (encoded == null || encoded.isBlank()) {
+            encoded = System.getenv(PUBLIC_KEY_ENV);
         }
-        int result = 0;
-        for (int i = 0; i < a.length; ++i) {
-            result |= a[i] ^ b[i];
+        if (encoded == null || encoded.isBlank()) {
+            return null;
         }
-        return result == 0;
+        try {
+            return Base64.getDecoder().decode(encoded.trim());
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     public static String computeServerFingerprint() {
         try {
-            Object raw = "";
+            String raw = "";
             try {
-                raw = (String)raw + FabricLoader.getInstance().getGameDir().toAbsolutePath().toString();
+                raw = raw + FabricLoader.getInstance().getGameDir().toAbsolutePath().toString();
+            } catch (Exception ignored) {
+                // FabricLoader unavailable (e.g. plain unit tests) - hash what we have.
             }
-            catch (Exception exception) {
-                // empty catch block
-            }
-            raw = (String)raw + InetAddress.getLocalHost().getHostName();
+            raw = raw + InetAddress.getLocalHost().getHostName();
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(((String)raw).getBytes(StandardCharsets.UTF_8));
-            return LicenseVerifier.bytesToHex(hash).substring(0, 16).toUpperCase();
-        }
-        catch (Exception e) {
+            byte[] hash = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
+            return bytesToHex(hash).substring(0, 16).toUpperCase();
+        } catch (Exception e) {
             return "UNKNOWN";
         }
     }
@@ -181,13 +237,11 @@ public class LicenseVerifier {
         return sb.toString();
     }
 
-
-    public static enum VerificationState {
+    public enum VerificationState {
         UNVERIFIED,
         VERIFIED,
         EXPIRED,
         FINGERPRINT_MISMATCH,
-        INVALID;
-
+        INVALID
     }
 }
