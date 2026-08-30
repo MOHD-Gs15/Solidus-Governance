@@ -186,14 +186,14 @@ public class GovernanceCommand {
                 .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
                     .executes(context -> executeRollback(context, engine)))
                 .then(Commands.literal("player")
-                    .then(Commands.argument("player", EntityArgument.player())
+                    .then(Commands.argument("target", EntityArgument.player())
                         .then(Commands.argument("fromDays", IntegerArgumentType.integer(1))
                             .executes(context -> executeRollbackPlayer(context, engine))))))
             .then(Commands.literal("dryrun")
                 .then(Commands.argument("auditId", IntegerArgumentType.integer(1))
                     .executes(context -> executeDryRun(context, engine)))
                 .then(Commands.literal("player")
-                    .then(Commands.argument("player", EntityArgument.player())
+                    .then(Commands.argument("target", EntityArgument.player())
                         .then(Commands.argument("fromDays", IntegerArgumentType.integer(1))
                             .executes(context -> executeDryRunPlayer(context, engine)))))
                 .then(Commands.literal("timeframe")
@@ -750,7 +750,7 @@ public class GovernanceCommand {
     }
 
     private static int executeRollbackPlayer(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
-        ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
+        ServerPlayer player = EntityArgument.getPlayer(context, (String)"target");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDays");
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
@@ -762,7 +762,7 @@ public class GovernanceCommand {
     }
 
     private static int executeDryRunPlayer(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
-        ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
+        ServerPlayer player = EntityArgument.getPlayer(context, (String)"target");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         int fromDays = IntegerArgumentType.getInteger(context, (String)"fromDays");
         long fromTimestamp = System.currentTimeMillis() - fromDays * 86_400_000L;
