@@ -6,7 +6,9 @@ Solidus Governance can change balances, freeze accounts, lock trading, apply tax
 
 ## Secrets
 
-Never commit `license.key`, `SOLIDUS_LICENSE_SECRET`, Discord webhook URLs, databases, runtime logs, or server configuration. The license signing secret belongs in a private operator-only service and must never be embedded in the public mod JAR or repository.
+Never commit `license.key`, the license signing PRIVATE key, Discord webhook URLs, databases, runtime logs, or server configuration. The private signing key belongs in a private operator-only service and must never be embedded in the public mod JAR or repository.
+
+Licenses use the SA2 format: `SA2-<base64(payload)>-<base64(Ed25519 signature)>` with payload `2|<licensee>|<expiry ISO-8601>|<fingerprint|ANY>`. Verification is asymmetric: servers only need the PUBLIC Ed25519 key via `SOLIDUS_LICENSE_PUBLIC_KEY` (base64 X.509). The private key is used exclusively by `tools/LicenseIssuer.java`; legacy SA1 keys (client-held HMAC secret, forgeable by design) are rejected outright.
 
 If a credential is exposed, revoke it immediately and issue a replacement with the smallest possible scope.
 
