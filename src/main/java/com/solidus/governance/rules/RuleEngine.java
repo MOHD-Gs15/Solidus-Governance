@@ -339,18 +339,18 @@ public class RuleEngine {
         try {
             String trimmed = duration.trim().toLowerCase();
             if (trimmed.endsWith("s")) {
-                return (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 1000.0);
+                return Math.max(0L, (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 1000.0));
             }
             if (trimmed.endsWith("m")) {
-                return (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 60000.0);
+                return Math.max(0L, (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 60000.0));
             }
             if (trimmed.endsWith("h")) {
-                return (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 3600000.0);
+                return Math.max(0L, (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 3600000.0));
             }
             if (trimmed.endsWith("d")) {
-                return (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 8.64E7);
+                return Math.max(0L, (long)(Double.parseDouble(trimmed.substring(0, trimmed.length() - 1)) * 8.64E7));
             }
-            return Long.parseLong(trimmed);
+            return Math.max(0L, Long.parseLong(trimmed));
         }
         catch (NumberFormatException e) {
             return 0L;

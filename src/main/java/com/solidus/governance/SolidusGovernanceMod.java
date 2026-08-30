@@ -42,6 +42,7 @@ import org.slf4j.LoggerFactory;
 public class SolidusGovernanceMod
 implements DedicatedServerModInitializer {
     public static final String MOD_ID = "solidus-governance";
+    public static final String VERSION = "1.1.0";
     public static final Logger LOGGER = LoggerFactory.getLogger((String)"solidus-governance");
     private GovernanceEngine engine;
     private LimitsDatabase limitsDatabase;
@@ -50,7 +51,7 @@ implements DedicatedServerModInitializer {
     private RuleDatabase ruleDatabase;
 
     public void onInitializeServer() {
-        LOGGER.info("Solidus Governance v1.0.0 initializing...");
+        LOGGER.info("Solidus Governance v{} initializing...", (Object)VERSION);
         SolidusIntegration.initialize();
         Path configDir = FabricLoader.getInstance().getConfigDir().resolve(MOD_ID);
         try {

@@ -42,7 +42,10 @@ public class TransactionLimits {
         double dailyMax = this.config.getDouble("limits.transfer.daily-max", -1.0);
         if (dailyMax >= 0.0) {
             DailyUsage usage = this.getOrCreateUsage(player);
-            double newTotal = usage.transferTotal + amount;
+            double newTotal;
+            synchronized (usage) {
+                newTotal = usage.transferTotal + amount;
+            }
             if (newTotal > dailyMax) {
                 this.auditLimitExceeded(player, "DAILY_TRANSFER_LIMIT", "attempted=" + amount + ";current_total=" + usage.transferTotal + ";daily_max=" + dailyMax);
                 return false;
@@ -71,7 +74,9 @@ public class TransactionLimits {
             return;
         }
         DailyUsage usage = this.getOrCreateUsage(player);
-        usage.transferTotal += amount;
+        synchronized (usage) {
+            usage.transferTotal += amount;
+        }
         this.persistUsage(player, usage);
         SolidusGovernanceMod.LOGGER.debug("Recorded transfer of {} for {}. Daily total: {}", new Object[]{amount, player, usage.transferTotal});
     }
@@ -81,7 +86,9 @@ public class TransactionLimits {
             return;
         }
         DailyUsage usage = this.getOrCreateUsage(player);
-        ++usage.auctionCount;
+        synchronized (usage) {
+            ++usage.auctionCount;
+        }
         this.persistUsage(player, usage);
         SolidusGovernanceMod.LOGGER.debug("Recorded auction listing for {}. Daily count: {}", (Object)player, (Object)usage.auctionCount);
     }

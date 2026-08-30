@@ -5,16 +5,16 @@ import com.solidus.governance.audit.AuditDatabase;
 import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.integration.SolidusIntegration;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.server.MinecraftServer;
 
 public class InterventionManager {
     private GovernanceEngine engine;
-    private final Map<UUID, String> suspiciousAccounts = new HashMap<UUID, String>();
+    private final Map<UUID, String> suspiciousAccounts = new ConcurrentHashMap<UUID, String>();
     private volatile boolean tradingLocked = false;
     private volatile String tradingLockReason = null;
 

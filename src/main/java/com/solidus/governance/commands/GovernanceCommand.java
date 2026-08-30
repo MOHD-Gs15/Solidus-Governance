@@ -244,7 +244,14 @@ public class GovernanceCommand {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Unknown tax type: " + type + ". Use: transfer, auction, shop", ChatFormatting.RED));
             return 0;
         }
+        if (!Double.isFinite(rate) || rate < 0.0 || rate > 1.0) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Invalid rate: " + rate + ". Must be between 0.0 and 1.0 (0% - 100%).", ChatFormatting.RED));
+            return 0;
+        }
+        String beforeValue = engine.getConfig().getString(configKey, "");
+        UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
         engine.getConfig().set(configKey, String.valueOf(rate));
+        engine.getAuditLogger().logConfigChange(adminUuid, source.getTextName(), configKey, beforeValue, String.valueOf(rate));
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + type + " tax rate set to " + String.format("%.1f%%", rate * 100.0), ChatFormatting.GREEN));
         return 1;
     }
@@ -264,6 +271,10 @@ public class GovernanceCommand {
     private static int executeBracketAdd(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
         double threshold = DoubleArgumentType.getDouble(context, (String)"threshold");
         double rate = DoubleArgumentType.getDouble(context, (String)"rate");
+        if (!Double.isFinite(threshold) || threshold < 0.0 || !Double.isFinite(rate) || rate <= 0.0 || rate > 1.0) {
+            GovernanceCommand.sendFeedback((CommandSourceStack)context.getSource(), (Component)GovernanceCommand.styled("  Invalid bracket: threshold must be >= 0 and rate must be between 0.0 (exclusive) and 1.0.", ChatFormatting.RED));
+            return 0;
+        }
         engine.getTaxEngine().addBracket(threshold, rate);
         GovernanceCommand.sendFeedback((CommandSourceStack)context.getSource(), (Component)GovernanceCommand.styled("  Added bracket: >= " + String.format("%.0f", threshold) + " at " + String.format("%.1f%%", rate * 100.0), ChatFormatting.GREEN));
         return 1;

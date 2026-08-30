@@ -6,15 +6,16 @@ import com.solidus.governance.integration.SolidusIntegration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Map;
-import java.util.TreeMap;
+import java.util.NavigableMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentSkipListMap;
 import net.minecraft.server.MinecraftServer;
 
 public class TaxEngine {
     private GovernanceEngine engine;
-    private final TreeMap<Double, Double> progressiveBrackets = new TreeMap();
+    private final NavigableMap<Double, Double> progressiveBrackets = new ConcurrentSkipListMap<Double, Double>();
 
     public TaxEngine(GovernanceEngine engine) {
         this.engine = engine;
@@ -109,12 +110,13 @@ public class TaxEngine {
         SolidusIntegration.getTopBalances(1000).thenCompose(balances -> {
             ArrayList<CompletableFuture<Void>> decayFutures = new ArrayList<>();
             for (SolidusIntegration.BalanceEntry entry : balances) {
-                if (entry.balance() <= threshold) continue;
-                double decay = TaxEngine.roundTax((entry.balance() - threshold) * rate);
-                if (!Double.isFinite(decay) || decay <= 0.0) continue;
                 CompletableFuture<Void> chain = SolidusIntegration.getBalance(null, entry.playerName())
                     .thenCompose(balanceBefore -> {
-                        if (balanceBefore == null || !Double.isFinite(balanceBefore) || balanceBefore < 0.0) {
+                        if (balanceBefore == null || !Double.isFinite(balanceBefore) || balanceBefore <= threshold) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        double decay = TaxEngine.roundTax((balanceBefore - threshold) * rate);
+                        if (!Double.isFinite(decay) || decay <= 0.0) {
                             return CompletableFuture.completedFuture(null);
                         }
                         return SolidusIntegration.subtractBalance(null, entry.playerName(), decay).thenAccept(newBalance -> {

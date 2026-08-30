@@ -109,9 +109,6 @@ public class GovernanceEngine {
         if (this.simulationEngine != null && this.simulationEngine.isRunning()) {
             this.simulationEngine.stop();
         }
-        if (this.transactionLimits != null) {
-            // empty if block
-        }
         SolidusGovernanceMod.LOGGER.info("Governance Engine shut down complete.");
     }
 

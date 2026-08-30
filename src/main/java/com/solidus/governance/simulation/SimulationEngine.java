@@ -12,6 +12,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -149,7 +150,7 @@ public class SimulationEngine {
                 long elapsedNanos = System.nanoTime() - startNanos;
                 this.lastTickNanos.set(elapsedNanos);
                 this.totalTicks.incrementAndGet();
-                int idx = this.tickHistoryIndex.getAndIncrement() % 20;
+                int idx = Math.floorMod(this.tickHistoryIndex.getAndIncrement(), 20);
                 this.tickHistory.set(idx, elapsedNanos);
                 this.computeAverageTickTime();
                 this.adjustThrottle(elapsedNanos, tps);
@@ -408,9 +409,10 @@ public class SimulationEngine {
             int count;
             ResultSet rs;
             long thirtyDaysAgoMs = System.currentTimeMillis() - 2592000000L;
-            String sql = "SELECT COUNT(*) FROM economy WHERE last_online > " + thirtyDaysAgoMs;
-            try {
-                rs = stmt.executeQuery(sql);
+            String sql = "SELECT COUNT(*) FROM player_balances WHERE last_updated > ?";
+            try (PreparedStatement ps = conn.prepareStatement(sql);){
+                ps.setLong(1, thirtyDaysAgoMs);
+                rs = ps.executeQuery();
                 if (rs.next() && (count = rs.getInt(1)) > 0) {
                     SolidusGovernanceMod.LOGGER.info("Simulation: DB reports {} active economy accounts (last 30 days)", (Object)count);
                     int n = count;
@@ -418,10 +420,10 @@ public class SimulationEngine {
                 }
             }
             catch (Exception e) {
-                SolidusGovernanceMod.LOGGER.debug("last_online column query failed, trying total count", (Throwable)e);
+                SolidusGovernanceMod.LOGGER.debug("last_updated column query failed, trying total count", (Throwable)e);
             }
             try {
-                rs = stmt.executeQuery("SELECT COUNT(*) FROM economy");
+                rs = stmt.executeQuery("SELECT COUNT(*) FROM player_balances");
                 if (!rs.next()) return -1;
                 count = rs.getInt(1);
                 if (count <= 0) return -1;

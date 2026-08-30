@@ -89,13 +89,18 @@ public class TreasuryManager {
                         return;
                     }
                     double perPlayer = (double)Math.round(distributeAmount / (double)onlineCount * 100.0) / 100.0;
+                    if (perPlayer <= 0.0) {
+                        contextFuture.complete(null);
+                        return;
+                    }
+                    double totalPayout = Math.round(perPlayer * (double)onlineCount * 100.0) / 100.0;
                     UUID[] playerUuids = new UUID[onlineCount];
                     String[] playerNames = new String[onlineCount];
                     for (int i = 0; i < onlineCount; ++i) {
                         playerUuids[i] = ((ServerPlayer)players.get(i)).getUUID();
                         playerNames[i] = ((ServerPlayer)players.get(i)).getName().getString();
                     }
-                    contextFuture.complete(new RedistributionContext(distributeAmount, perPlayer, playerUuids, playerNames));
+                    contextFuture.complete(new RedistributionContext(totalPayout, perPlayer, playerUuids, playerNames));
                 }
                 catch (Exception e) {
                     contextFuture.completeExceptionally(e);
@@ -105,23 +110,32 @@ public class TreasuryManager {
                 if (ctx == null) {
                     return CompletableFuture.completedFuture(0);
                 }
-                return SolidusIntegration.subtractBalance(treasury, "Treasury", ctx.distributeAmount).thenCompose(treasuryResult -> {
+                return SolidusIntegration.subtractBalance(treasury, "Treasury", ctx.totalPayout()).thenCompose(treasuryResult -> {
                     if (treasuryResult == null || treasuryResult < 0.0) {
                         return CompletableFuture.completedFuture(0);
                     }
                     List<CompletableFuture<Integer>> distributionFutures = new ArrayList<>();
-                    for (int i = 0; i < ctx.playerUuids.length; ++i) {
-                        distributionFutures.add(SolidusIntegration.addBalance(ctx.playerUuids[i], ctx.playerNames[i], ctx.perPlayer).thenApply(result -> result != null && result >= 0.0 ? 1 : 0).exceptionally(ex -> 0));
+                    for (int i = 0; i < ctx.playerUuids().length; ++i) {
+                        distributionFutures.add(SolidusIntegration.addBalance(ctx.playerUuids()[i], ctx.playerNames()[i], ctx.perPlayer()).thenApply(result -> result != null && result >= 0.0 ? 1 : 0).exceptionally(ex -> 0));
                     }
                     return CompletableFuture.allOf(distributionFutures.toArray(new CompletableFuture[0])).thenApply(v -> {
                         int distributed = 0;
                         for (CompletableFuture<Integer> future : distributionFutures) {
                             distributed += future.join();
                         }
-                        if (this.engine != null && this.server != null) {
-                            this.server.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(adminUuid, adminName, "REDISTRIBUTE", ctx.distributeAmount));
+                        int failed = ctx.playerUuids().length - distributed;
+                        if (failed > 0) {
+                            double refund = Math.round(ctx.perPlayer() * (double)failed * 100.0) / 100.0;
+                            SolidusIntegration.addBalance(treasury, "Treasury", refund).exceptionally(ex -> {
+                                SolidusGovernanceMod.LOGGER.error("Failed to refund {} undelivered redistribution share(s) ({} S$) to treasury", new Object[]{failed, String.format("%.2f", refund), ex});
+                                return -1.0;
+                            });
+                            SolidusGovernanceMod.LOGGER.warn("Redistribution: {} share(s) failed to deliver; refunded {} S$ to treasury.", new Object[]{failed, String.format("%.2f", refund)});
                         }
-                        SolidusGovernanceMod.LOGGER.info("Redistributed {} to {} online players ({} each)", new Object[]{String.format("%.2f", ctx.distributeAmount), distributed, String.format("%.2f", ctx.perPlayer)});
+                        if (this.engine != null && this.server != null) {
+                            this.server.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(adminUuid, adminName, "REDISTRIBUTE", ctx.totalPayout()));
+                        }
+                        SolidusGovernanceMod.LOGGER.info("Redistributed {} to {} online players ({} each)", new Object[]{String.format("%.2f", ctx.totalPayout()), distributed, String.format("%.2f", ctx.perPlayer())});
                         return distributed;
                     });
                 });
@@ -135,6 +149,6 @@ public class TreasuryManager {
         SolidusGovernanceMod.LOGGER.info("Treasury account set to: {}", (Object)treasuryUuid);
     }
 
-    private record RedistributionContext(double distributeAmount, double perPlayer, UUID[] playerUuids, String[] playerNames) {
+    private record RedistributionContext(double totalPayout, double perPlayer, UUID[] playerUuids, String[] playerNames) {
     }
 }

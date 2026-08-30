@@ -49,6 +49,17 @@ public class EventManager {
                 SolidusGovernanceMod.LOGGER.warn("Event creation rejected: unknown event type '{}'", (Object)type);
                 return null;
             }
+            if (!EventManager.isValidModifier(modifier)) {
+                SolidusGovernanceMod.LOGGER.warn("Event creation rejected: modifier '{}' out of range (must be finite, > 0, <= 100)", (Object)modifier);
+                return null;
+            }
+            synchronized (this.activeEvents) {
+                for (EconomyEvent existing : this.activeEvents.values()) {
+                    if (!existing.getType().equals(normalizedType)) continue;
+                    SolidusGovernanceMod.LOGGER.warn("Event creation rejected: a {} event is already active ('{}'). Overlapping same-type events would corrupt config revert state.", new Object[]{normalizedType, existing.getName()});
+                    return null;
+                }
+            }
             String eventId = UUID.randomUUID().toString();
             long now = System.currentTimeMillis();
             long endTime = now + durationMillis;
@@ -351,5 +362,9 @@ public class EventManager {
             case "CUSTOM" -> "CUSTOM";
             default -> null;
         };
+    }
+
+    public static boolean isValidModifier(double modifier) {
+        return Double.isFinite(modifier) && modifier > 0.0 && modifier <= 100.0;
     }
 }

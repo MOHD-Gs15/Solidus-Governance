@@ -3,13 +3,13 @@ package com.solidus.governance.intervention;
 import com.solidus.governance.SolidusGovernanceMod;
 import com.solidus.governance.audit.AuditDatabase;
 import com.solidus.governance.engine.GovernanceEngine;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class AccountFreezer {
-    private final Set<UUID> frozenCache = new HashSet<UUID>();
+    private final Set<UUID> frozenCache = ConcurrentHashMap.newKeySet();
     private GovernanceEngine engine;
 
     public void setEngine(GovernanceEngine engine) {

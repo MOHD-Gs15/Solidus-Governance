@@ -75,7 +75,7 @@ public class GovernanceAutomator {
                 this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_DECREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
                 this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Decreased", "Auction tax decreased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
             } else {
-                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_CHECK", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";action=monitoring");
+                SolidusGovernanceMod.LOGGER.debug("Anti-inflation monitoring: avg_balance={}, threshold={} (no action)", new Object[]{String.format("%.2f", avgBalance), String.valueOf(threshold)});
             }
         });
     }

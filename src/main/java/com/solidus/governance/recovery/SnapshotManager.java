@@ -14,13 +14,17 @@ import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import net.minecraft.server.MinecraftServer;
 
 public class SnapshotManager {
+    private static final Pattern SNAPSHOT_NAME_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
     private final Path snapshotDir;
     private GovernanceEngine engine;
     private volatile MinecraftServer server;
+    private final AtomicLong lastAutoSnapshotMs = new AtomicLong(0L);
 
     public SnapshotManager(Path configDir, GovernanceEngine engine) {
         this.snapshotDir = configDir.resolve("snapshots");
@@ -48,7 +52,13 @@ public class SnapshotManager {
     public CompletableFuture<Path> createSnapshot(String name) {
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
         String filename = name != null ? "snapshot-" + name + ".json" : "snapshot-" + timestamp + ".json";
-        Path snapshotPath = this.snapshotDir.resolve(filename);
+        Path snapshotPath = this.snapshotDir.resolve(filename).normalize();
+        if (name != null && SnapshotManager.sanitizeSnapshotName(name) == null) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Invalid snapshot name: '" + name + "'. Use letters, digits, dot, hyphen, underscore (max 64 chars)."));
+        }
+        if (!snapshotPath.startsWith(this.snapshotDir.normalize())) {
+            return CompletableFuture.failedFuture(new IllegalArgumentException("Snapshot path escapes the snapshots directory."));
+        }
         return ((CompletableFuture)SolidusIntegration.getTopBalances(100000).thenApplyAsync(balances -> {
             try {
                 StringBuilder json = new StringBuilder();
@@ -89,7 +99,27 @@ public class SnapshotManager {
     }
 
     public void autoSnapshot() {
+        int intervalHours = 6;
+        if (this.engine != null) {
+            intervalHours = this.engine.getConfig().getInt("recovery.snapshot.auto-interval-hours", 6);
+        }
+        intervalHours = Math.max(1, intervalHours);
+        long intervalMs = intervalHours * 3600000L;
+        long now = System.currentTimeMillis();
+        long last = this.lastAutoSnapshotMs.get();
+        if (last != 0L && now - last < intervalMs) {
+            SolidusGovernanceMod.LOGGER.debug("Auto-snapshot skipped: next run in {} minutes.", (Object)((intervalMs - (now - last)) / 60000L));
+            return;
+        }
+        this.lastAutoSnapshotMs.set(now);
         this.createSnapshot(null);
+    }
+
+    static String sanitizeSnapshotName(String name) {
+        if (name == null || !SNAPSHOT_NAME_PATTERN.matcher(name).matches()) {
+            return null;
+        }
+        return name;
     }
 
     public List<String> listSnapshots() {
