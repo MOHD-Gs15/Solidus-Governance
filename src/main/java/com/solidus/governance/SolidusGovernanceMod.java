@@ -20,6 +20,7 @@ import com.solidus.governance.limits.TransactionLimits;
 import com.solidus.governance.policy.PolicyDatabase;
 import com.solidus.governance.policy.PolicyManager;
 import com.solidus.governance.profile.ProfileGenerator;
+import com.solidus.governance.recovery.BackupManager;
 import com.solidus.governance.recovery.RollbackEngine;
 import com.solidus.governance.recovery.SnapshotManager;
 import com.solidus.governance.rules.RuleDatabase;
@@ -93,6 +94,62 @@ implements DedicatedServerModInitializer {
         rollbackEngine.setEngine(this.engine);
         snapshotManager.setEngine(this.engine);
         automator.setEngine(this.engine);
+        BackupManager backupManager = new BackupManager(configDir);
+        backupManager.initialize();
+        backupManager.setEngine(this.engine);
+        backupManager.setDbController(new BackupManager.GovernanceDbController() {
+            @Override
+            public void shutdownGovernanceDb(String fileName) {
+                switch (fileName) {
+                    case "governance.db" -> {
+                        auditDatabase.shutdown();
+                        if (SolidusGovernanceMod.this.policyDatabase != null) {
+                            SolidusGovernanceMod.this.policyDatabase.shutdown();
+                        }
+                    }
+                    case "rules.db" -> {
+                        if (SolidusGovernanceMod.this.ruleDatabase != null) {
+                            SolidusGovernanceMod.this.ruleDatabase.shutdown();
+                        }
+                    }
+                    case "events.db" -> {
+                        if (SolidusGovernanceMod.this.eventDatabase != null) {
+                            SolidusGovernanceMod.this.eventDatabase.shutdown();
+                        }
+                    }
+                    case "limits.db" -> SolidusGovernanceMod.this.limitsDatabase.shutdown();
+                    case "tax_ledger.db" -> SolidusGovernanceMod.this.taxLedgerDatabase.shutdown();
+                    default -> { }
+                }
+            }
+
+            @Override
+            public void reinitializeGovernanceDb(String fileName) {
+                switch (fileName) {
+                    case "governance.db" -> {
+                        auditDatabase.initialize();
+                        if (SolidusGovernanceMod.this.policyDatabase != null) {
+                            SolidusGovernanceMod.this.policyDatabase.initialize();
+                        }
+                    }
+                    case "rules.db" -> {
+                        if (SolidusGovernanceMod.this.ruleDatabase != null) {
+                            SolidusGovernanceMod.this.ruleDatabase.initialize();
+                        }
+                    }
+                    case "events.db" -> {
+                        if (SolidusGovernanceMod.this.eventDatabase != null) {
+                            SolidusGovernanceMod.this.eventDatabase.initialize();
+                        }
+                    }
+                    case "limits.db" -> SolidusGovernanceMod.this.limitsDatabase.initialize();
+                    case "tax_ledger.db" -> SolidusGovernanceMod.this.taxLedgerDatabase.initialize();
+                    default -> { }
+                }
+            }
+        });
+        this.engine.setBackupManager(backupManager);
+        LOGGER.info("Backup Manager: ENABLED (auto every recovery.backup.auto-interval-hours, verified VACUUM INTO copies)");
         WebhookManager webhookManager = new WebhookManager(config);
         this.engine.setWebhookManager(webhookManager);
         if (webhookManager.isDiscordEnabled() && licenseVerifier.isPremiumEnabled()) {

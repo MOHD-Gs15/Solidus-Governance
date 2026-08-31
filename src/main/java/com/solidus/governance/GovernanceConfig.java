@@ -40,6 +40,9 @@ public class GovernanceConfig {
         this.defaults.put("recovery.snapshot.retention", "28");
         this.defaults.put("recovery.snapshot.auto-enabled", "false");
         this.defaults.put("recovery.snapshot.auto-interval-hours", "6");
+        this.defaults.put("recovery.backup.enabled", "true");
+        this.defaults.put("recovery.backup.auto-interval-hours", "24");
+        this.defaults.put("recovery.backup.retention", "7");
         this.defaults.put("automation.enabled", "false");
         this.defaults.put("automation.anti-inflation.enabled", "false");
         this.defaults.put("automation.anti-inflation.threshold", "15.0");

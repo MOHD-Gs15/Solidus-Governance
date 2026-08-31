@@ -13,6 +13,7 @@ import com.solidus.governance.license.LicenseVerifier;
 import com.solidus.governance.limits.TransactionLimits;
 import com.solidus.governance.policy.PolicyManager;
 import com.solidus.governance.profile.ProfileGenerator;
+import com.solidus.governance.recovery.BackupManager;
 import com.solidus.governance.recovery.RollbackEngine;
 import com.solidus.governance.recovery.SnapshotManager;
 import com.solidus.governance.rules.RuleEngine;
@@ -42,6 +43,7 @@ public class GovernanceEngine {
     private ProfileGenerator profileGenerator;
     private RuleEngine ruleEngine;
     private SimulationEngine simulationEngine;
+    private BackupManager backupManager;
     private long tickCounter = 0L;
     private String lastKnownDate = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);
 
@@ -98,6 +100,9 @@ public class GovernanceEngine {
             if (this.config.getBool("recovery.snapshot.auto-enabled", false)) {
                 this.snapshotManager.autoSnapshot();
             }
+            if (this.backupManager != null) {
+                this.backupManager.maybeAutoBackup();
+            }
         }
     }
 
@@ -105,6 +110,9 @@ public class GovernanceEngine {
         SolidusGovernanceMod.LOGGER.info("Governance Engine shutting down...");
         this.interventionManager.persistState();
         this.auditDatabase.shutdown();
+        if (this.backupManager != null) {
+            this.backupManager.shutdown();
+        }
         if (this.webhookManager != null) {
             this.webhookManager.shutdown();
         }
@@ -172,6 +180,14 @@ public class GovernanceEngine {
 
     public EventManager getEventManager() {
         return this.eventManager;
+    }
+
+    public void setBackupManager(BackupManager backupManager) {
+        this.backupManager = backupManager;
+    }
+
+    public BackupManager getBackupManager() {
+        return this.backupManager;
     }
 
     public void setWebhookManager(WebhookManager webhookManager) {

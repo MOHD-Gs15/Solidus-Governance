@@ -144,6 +144,16 @@ class CommandTreeShapeTest {
         expected.add("governance profile *");
         expected.add("governance profile player");
         expected.add("governance recovery *");
+        expected.add("governance recovery backup *");
+        expected.add("governance recovery backup create");
+        expected.add("governance recovery backup create name");
+        expected.add("governance recovery backup list");
+        expected.add("governance recovery backup list count");
+        expected.add("governance recovery backup restore *");
+        expected.add("governance recovery backup restore run *");
+        expected.add("governance recovery backup restore run database");
+        expected.add("governance recovery backup restore run database confirm");
+        expected.add("governance recovery backup status");
         expected.add("governance recovery dryrun *");
         expected.add("governance recovery dryrun auditId");
         expected.add("governance recovery dryrun player *");

@@ -18,6 +18,7 @@ import com.solidus.governance.license.LicenseVerifier;
 import com.solidus.governance.limits.TransactionLimits;
 import com.solidus.governance.policy.EconomyPolicy;
 import com.solidus.governance.policy.PolicyManager;
+import com.solidus.governance.recovery.BackupManager;
 import com.solidus.governance.rules.AutomationRule;
 import com.solidus.governance.rules.RuleEngine;
 import com.solidus.governance.simulation.SimulationEngine;
@@ -206,7 +207,28 @@ public class GovernanceCommand {
                         .executes(context -> executeRollbackTimeframe(context, engine)))))
             .then(Commands.literal("timeline")
                 .then(Commands.argument("player", EntityArgument.player())
-                    .executes(context -> executeTimeline(context, engine))));
+                    .executes(context -> executeTimeline(context, engine))))
+            .then(Commands.literal("backup")
+                .then(Commands.literal("create")
+                    .executes(context -> executeBackupCreate(context, engine, null))
+                    .then(Commands.argument("name", StringArgumentType.word())
+                        .executes(context -> executeBackupCreate(context, engine, StringArgumentType.getString(context, "name")))))
+                .then(Commands.literal("list")
+                    .executes(context -> executeBackupList(context, engine, 5))
+                    .then(Commands.argument("count", IntegerArgumentType.integer(1, 50))
+                        .executes(context -> executeBackupList(context, engine, IntegerArgumentType.getInteger(context, "count")))))
+                .then(Commands.literal("status")
+                    .executes(context -> executeBackupStatus(context, engine)))
+                .then(Commands.literal("restore")
+                    .then(Commands.argument("run", StringArgumentType.word())
+                        .then(Commands.argument("database", StringArgumentType.word())
+                            .executes(context -> executeBackupRestore(context, engine,
+                                StringArgumentType.getString(context, "run"),
+                                StringArgumentType.getString(context, "database"), false))
+                            .then(Commands.literal("confirm")
+                                .executes(context -> executeBackupRestore(context, engine,
+                                    StringArgumentType.getString(context, "run"),
+                                    StringArgumentType.getString(context, "database"), true)))))));
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> buildAutomation(GovernanceEngine engine) {
@@ -700,6 +722,102 @@ public class GovernanceCommand {
             SolidusGovernanceMod.LOGGER.error("Audit CSV export failed", (Throwable)e);
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Export failed - check the server log for details.", ChatFormatting.RED));
         }
+        return 1;
+    }
+
+    private static int executeBackupCreate(CommandContext<CommandSourceStack> context, GovernanceEngine engine, String name) {
+        CommandSourceStack source = (CommandSourceStack) context.getSource();
+        BackupManager backupManager = engine.getBackupManager();
+        if (backupManager == null) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup subsystem is not available.", ChatFormatting.RED));
+            return 0;
+        }
+        GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup started" + (name != null ? " (label: " + name + ")" : "") + ", verifying every database with VACUUM INTO + integrity_check...", ChatFormatting.YELLOW));
+        backupManager.createBackup(name).whenComplete((result, ex) -> source.getServer().execute(() -> {
+            if (ex != null) {
+                GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup failed: " + ex.getMessage(), ChatFormatting.RED));
+                return;
+            }
+            for (String line : describeBackupResult(result)) {
+                GovernanceCommand.sendFeedback(source, GovernanceCommand.styled(line, result.ok() ? ChatFormatting.GREEN : ChatFormatting.RED));
+            }
+        }));
+        return 1;
+    }
+
+    private static List<String> describeBackupResult(BackupManager.BackupResult result) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Backup run: " + result.runDir().getFileName());
+        for (BackupManager.FileResult f : result.files()) {
+            if (f.ok()) {
+                lines.add(String.format("  [OK] %-14s %6.1f KB  integrity=%s  sha256=%.12s...",
+                        f.database(), f.sizeBytes() / 1024.0, f.integrity(), f.sha256()));
+            } else {
+                lines.add("  [FAIL] " + f.database() + ": " + f.error());
+            }
+        }
+        for (String skipped : result.skipped()) {
+            lines.add("  [SKIP] " + skipped);
+        }
+        lines.addAll(result.errors());
+        lines.add("Verified copies in: " + result.runDir());
+        return lines;
+    }
+
+    private static int executeBackupList(CommandContext<CommandSourceStack> context, GovernanceEngine engine, int count) {
+        CommandSourceStack source = (CommandSourceStack) context.getSource();
+        BackupManager backupManager = engine.getBackupManager();
+        if (backupManager == null) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup subsystem is not available.", ChatFormatting.RED));
+            return 0;
+        }
+        List<String> lines = backupManager.listBackups(count);
+        GovernanceCommand.sendFeedback(source, GovernanceCommand.styledBold("  Backup Runs:", ChatFormatting.YELLOW));
+        for (String line : lines) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled(line, ChatFormatting.WHITE));
+        }
+        return 1;
+    }
+
+    private static int executeBackupStatus(CommandContext<CommandSourceStack> context, GovernanceEngine engine) {
+        CommandSourceStack source = (CommandSourceStack) context.getSource();
+        BackupManager backupManager = engine.getBackupManager();
+        if (backupManager == null) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup subsystem is not available.", ChatFormatting.RED));
+            return 0;
+        }
+        GovernanceCommand.sendFeedback(source, GovernanceCommand.styledBold("  Backup Status:", ChatFormatting.YELLOW));
+        for (String line : backupManager.statusLines()) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  " + line, ChatFormatting.WHITE));
+        }
+        return 1;
+    }
+
+    private static int executeBackupRestore(CommandContext<CommandSourceStack> context, GovernanceEngine engine, String run, String database, boolean confirm) {
+        CommandSourceStack source = (CommandSourceStack) context.getSource();
+        BackupManager backupManager = engine.getBackupManager();
+        if (backupManager == null) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Backup subsystem is not available.", ChatFormatting.RED));
+            return 0;
+        }
+        if (!confirm) {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Validating restore plan (preview only)...", ChatFormatting.YELLOW));
+        } else {
+            GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  RESTORE " + database + " from " + run + " confirmed. Executing...", ChatFormatting.GOLD));
+        }
+        backupManager.restore(run, database, confirm).whenComplete((result, ex) -> source.getServer().execute(() -> {
+            if (ex != null) {
+                GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Restore failed: " + ex.getMessage(), ChatFormatting.RED));
+                return;
+            }
+            for (String line : result.lines()) {
+                GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  " + line,
+                        result.success() ? ChatFormatting.GREEN : ChatFormatting.RED));
+            }
+            if (result.success() && !result.preview() && result.restartRequired()) {
+                GovernanceCommand.sendFeedback(source, GovernanceCommand.styled("  Restart the server to activate the restored file.", ChatFormatting.GOLD));
+            }
+        }));
         return 1;
     }
 

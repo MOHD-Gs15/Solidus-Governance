@@ -10,6 +10,18 @@ public class AuditLogger {
         this.database = database;
     }
 
+    /** Audit entry for a backup run (success or partial). */
+    public void logBackup(String action, String details) {
+        AuditDatabase.AuditEntry entry = AuditDatabase.AuditEntry.create(System.currentTimeMillis(), "SYSTEM", "BackupManager", action, "RECOVERY", null, null, null, null, details, 0);
+        this.database.logAudit(entry);
+    }
+
+    /** Audit entry for a restore operation (preview-less confirmed swap). */
+    public void logRestore(UUID adminUuid, String adminName, String details) {
+        AuditDatabase.AuditEntry entry = AuditDatabase.AuditEntry.create(System.currentTimeMillis(), adminUuid != null ? adminUuid.toString() : "SYSTEM", adminName != null ? adminName : "BackupManager", "RESTORE", "RECOVERY", null, null, null, null, details, 0);
+        this.database.logAudit(entry);
+    }
+
     public void logBalanceChange(UUID adminUuid, String adminName, UUID targetUuid, String targetName, String action, double beforeBalance, double afterBalance, double changeAmount) {
         AuditDatabase.AuditEntry entry = AuditDatabase.AuditEntry.create(System.currentTimeMillis(), adminUuid != null ? adminUuid.toString() : "SYSTEM", adminName, action, "INTERVENTION", targetUuid != null ? targetUuid.toString() : null, targetName, String.valueOf(beforeBalance), String.valueOf(afterBalance), "change=" + changeAmount, 0);
         this.database.logAudit(entry);
