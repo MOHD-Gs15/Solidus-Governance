@@ -58,44 +58,65 @@ public class GovernanceAutomator {
         double threshold = this.engine.getConfig().getDouble("automation.anti-inflation.threshold", 15.0);
         double currentAuctionRate = this.engine.getConfig().getDouble("taxation.auction.rate", 0.05);
         double maxRate = 0.25;
+        // R28: prefer Core's single-query aggregates; only an old Core without
+        // the API falls back to the legacy getTopBalances(100000) row pull.
+        CompletableFuture<SolidusIntegration.EconomyStats> statsFuture = SolidusIntegration.getEconomyStats();
+        if (statsFuture != null) {
+            statsFuture.thenAccept(stats -> {
+                if (stats == null) {
+                    this.evaluateAntiInflationFromRows(threshold, currentAuctionRate, maxRate);
+                    return;
+                }
+                this.evaluateAntiInflation(stats.avgBalance(), threshold, currentAuctionRate, maxRate);
+            });
+            return;
+        }
+        this.evaluateAntiInflationFromRows(threshold, currentAuctionRate, maxRate);
+    }
+
+    /** Legacy path: row pull to compute the average (old Core builds). */
+    private void evaluateAntiInflationFromRows(double threshold, double currentAuctionRate, double maxRate) {
         SolidusIntegration.getTopBalances(100000).thenAccept(balances -> {
-            double avgBalance;
             double totalSupply = 0.0;
             for (SolidusIntegration.BalanceEntry entry : balances) {
                 totalSupply += entry.balance();
             }
-            double d = avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
-            if (avgBalance > threshold && currentAuctionRate < maxRate) {
-                // COOLDOWN FIX: the periodic check runs every ~60s, and every
-                // above-threshold check used to raise the auction rate by 0.01
-                // AND synchronously rewrite the config file - climbing to the
-                // 0.25 cap in ~20 minutes and hammering the disk along the way,
-                // with no administrator-visible breathing room. Raises are now
-                // separated by a configurable cooldown
-                // (automation.anti-inflation.cooldown-minutes, default 60).
-                long cooldownMs = this.engine.getConfig().getInt("automation.anti-inflation.cooldown-minutes", 60) * 60_000L;
-                long now = System.currentTimeMillis();
-                if (cooldownMs > 0 && now - this.lastAntiInflationRaiseMs < cooldownMs) {
-                    SolidusGovernanceMod.LOGGER.debug(
-                        "Anti-inflation: raise skipped (cooldown) - avg {} above threshold {}",
-                        String.format("%.2f", avgBalance), String.format("%.2f", threshold));
-                    return;
-                }
-                this.lastAntiInflationRaiseMs = now;
-                double newRate = Math.min(currentAuctionRate + 0.01, maxRate);
-                this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
-                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_INCREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
-                this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Increased", "Auction tax increased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
-                SolidusGovernanceMod.LOGGER.info("Anti-inflation: Auction tax increased from {}% to {}% (avg balance: {})", new Object[]{String.format("%.1f", currentAuctionRate * 100.0), String.format("%.1f", newRate * 100.0), String.format("%.2f", avgBalance)});
-            } else if (avgBalance < threshold * 0.8 && currentAuctionRate > 0.05) {
-                double newRate = Math.max(currentAuctionRate - 0.005, 0.05);
-                this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
-                this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_DECREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
-                this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Decreased", "Auction tax decreased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
-            } else {
-                SolidusGovernanceMod.LOGGER.debug("Anti-inflation monitoring: avg_balance={}, threshold={} (no action)", new Object[]{String.format("%.2f", avgBalance), String.valueOf(threshold)});
-            }
+            double avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
+            this.evaluateAntiInflation(avgBalance, threshold, currentAuctionRate, maxRate);
         });
+    }
+
+    private void evaluateAntiInflation(double avgBalance, double threshold, double currentAuctionRate, double maxRate) {
+        if (avgBalance > threshold && currentAuctionRate < maxRate) {
+            // COOLDOWN FIX: the periodic check runs every ~60s, and every
+            // above-threshold check used to raise the auction rate by 0.01
+            // AND synchronously rewrite the config file - climbing to the
+            // 0.25 cap in ~20 minutes and hammering the disk along the way,
+            // with no administrator-visible breathing room. Raises are now
+            // separated by a configurable cooldown
+            // (automation.anti-inflation.cooldown-minutes, default 60).
+            long cooldownMs = this.engine.getConfig().getInt("automation.anti-inflation.cooldown-minutes", 60) * 60_000L;
+            long now = System.currentTimeMillis();
+            if (cooldownMs > 0 && now - this.lastAntiInflationRaiseMs < cooldownMs) {
+                SolidusGovernanceMod.LOGGER.debug(
+                    "Anti-inflation: raise skipped (cooldown) - avg {} above threshold {}",
+                    String.format("%.2f", avgBalance), String.format("%.2f", threshold));
+                return;
+            }
+            this.lastAntiInflationRaiseMs = now;
+            double newRate = Math.min(currentAuctionRate + 0.01, maxRate);
+            this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
+            this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_INCREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
+            this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Increased", "Auction tax increased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
+            SolidusGovernanceMod.LOGGER.info("Anti-inflation: Auction tax increased from {}% to {}% (avg balance: {})", new Object[]{String.format("%.1f", currentAuctionRate * 100.0), String.format("%.1f", newRate * 100.0), String.format("%.2f", avgBalance)});
+        } else if (avgBalance < threshold * 0.8 && currentAuctionRate > 0.05) {
+            double newRate = Math.max(currentAuctionRate - 0.005, 0.05);
+            this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
+            this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_DECREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
+            this.sendDiscordAlert("AUTOMATION", "Anti-Inflation: Tax Rate Decreased", "Auction tax decreased from " + String.format("%.1f%%", currentAuctionRate * 100.0) + " to " + String.format("%.1f%%", newRate * 100.0) + " (avg balance: " + String.format("%.2f", avgBalance) + ")");
+        } else {
+            SolidusGovernanceMod.LOGGER.debug("Anti-inflation monitoring: avg_balance={}, threshold={} (no action)", new Object[]{String.format("%.2f", avgBalance), String.valueOf(threshold)});
+        }
     }
 
     private void checkWealthCaps() {

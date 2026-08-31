@@ -103,6 +103,10 @@ public class RuleEngine {
 
     public CompletableFuture<Void> evaluateAll() {
         return ((CompletableFuture)this.computeContext().thenAccept(ctx -> {
+            if (ctx == null) {
+                SolidusGovernanceMod.LOGGER.warn("Rule evaluation skipped: economy context unavailable.");
+                return;
+            }
             for (AutomationRule rule : this.rules.values()) {
                 if (!rule.isEnabled() || !rule.isOffCooldown() || !rule.evaluate((RuleContext)ctx)) continue;
                 SolidusGovernanceMod.LOGGER.info("Rule '{}' triggered! Executing {} actions...", (Object)rule.getName(), (Object)rule.getActions().size());
@@ -119,6 +123,22 @@ public class RuleEngine {
     }
 
     private CompletableFuture<RuleContext> computeContext() {
+        // R28: prefer the single-query aggregates (Core >= 2.1.x) - no rows
+        // cross the reflection boundary. Falls back to the legacy
+        // getTopBalances(100000) row pull when Core predates the API or a
+        // mapping failure leaves the stats unmappable.
+        CompletableFuture<SolidusIntegration.EconomyStats> statsFuture = SolidusIntegration.getEconomyStats();
+        if (statsFuture != null) {
+            return statsFuture.thenCompose(stats -> stats != null
+                ? CompletableFuture.completedFuture(
+                    this.finishContext(stats.avgBalance(), stats.totalSupply(), stats.giniCoefficient()))
+                : this.computeContextFromRows());
+        }
+        return this.computeContextFromRows();
+    }
+
+    /** Legacy path: row pull (old Core). Kept for compatibility only. */
+    private CompletableFuture<RuleContext> computeContextFromRows() {
         return SolidusIntegration.getTopBalances(100000).thenApply(balances -> {
             double totalMoneySupply = 0.0;
             for (SolidusIntegration.BalanceEntry entry : balances) {
@@ -126,15 +146,20 @@ public class RuleEngine {
             }
             double avgBalance = balances.isEmpty() ? 0.0 : totalMoneySupply / (double)balances.size();
             double giniCoefficient = this.computeGini((List<SolidusIntegration.BalanceEntry>)balances);
-            int onlinePlayerCount = 0;
-            MinecraftServer srv = SolidusIntegration.getServer();
-            if (srv != null) {
-                onlinePlayerCount = srv.getPlayerList().getPlayerCount();
-            }
-            double transactionVolume24h = this.computeTransactionVolume24h();
-            double inflationRate = this.estimateInflationRate(avgBalance);
-            return new RuleContext(avgBalance, totalMoneySupply, onlinePlayerCount, giniCoefficient, transactionVolume24h, inflationRate);
+            return this.finishContext(avgBalance, totalMoneySupply, giniCoefficient);
         });
+    }
+
+    /** Shared tail: online count + 24h volume + inflation estimate. */
+    private RuleContext finishContext(double avgBalance, double totalMoneySupply, double giniCoefficient) {
+        int onlinePlayerCount = 0;
+        MinecraftServer srv = SolidusIntegration.getServer();
+        if (srv != null) {
+            onlinePlayerCount = srv.getPlayerList().getPlayerCount();
+        }
+        double transactionVolume24h = this.computeTransactionVolume24h();
+        double inflationRate = this.estimateInflationRate(avgBalance);
+        return new RuleContext(avgBalance, totalMoneySupply, onlinePlayerCount, giniCoefficient, transactionVolume24h, inflationRate);
     }
 
     private double computeGini(List<SolidusIntegration.BalanceEntry> balances) {

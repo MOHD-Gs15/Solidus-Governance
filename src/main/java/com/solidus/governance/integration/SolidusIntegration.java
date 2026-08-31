@@ -24,6 +24,7 @@ public class SolidusIntegration {
     private static MethodHandle addBalanceOfflineHandle;
     private static MethodHandle subtractBalanceOfflineHandle;
     private static MethodHandle getTopBalancesHandle;
+    private static MethodHandle getEconomyStatsHandle;
     private static MethodHandle getEconomyEngineHandle;
     private static MethodHandle getStorageHandle;
     private static MethodHandle storageSetBalanceHandle;
@@ -60,6 +61,15 @@ public class SolidusIntegration {
             addBalanceOfflineHandle = LOOKUP.findVirtual(apiClass, "addBalanceOffline", MethodType.methodType(CompletableFuture.class, UUID.class, String.class, Double.TYPE));
             subtractBalanceOfflineHandle = LOOKUP.findVirtual(apiClass, "subtractBalanceOffline", MethodType.methodType(CompletableFuture.class, UUID.class, String.class, Double.TYPE));
             getTopBalancesHandle = LOOKUP.findVirtual(apiClass, "getTopBalances", MethodType.methodType(CompletableFuture.class, Integer.TYPE));
+            try {
+                // Core >= 2.1.x: economy-wide aggregates computed in SQL (R28).
+                // Old Cores lack the method - handle stays null and callers
+                // degrade to the legacy getTopBalances(100000) row pull.
+                getEconomyStatsHandle = LOOKUP.findVirtual(apiClass, "getEconomyStats", MethodType.methodType(CompletableFuture.class));
+            }
+            catch (NoSuchMethodException oldCore) {
+                SolidusGovernanceMod.LOGGER.info("SolidusAPI.getEconomyStats() not found (older Core) - stats consumers will fall back to row pulls.");
+            }
             getEconomyEngineHandle = LOOKUP.findVirtual(apiClass, "getEconomyEngine", MethodType.methodType(Class.forName("com.solidus.economy.EconomyEngine")));
             Class<?> economyEngineClass = Class.forName("com.solidus.economy.EconomyEngine");
             getStorageHandle = LOOKUP.findVirtual(economyEngineClass, "getStorage", MethodType.methodType(Class.forName("com.solidus.economy.SQLiteStorage")));
@@ -254,6 +264,46 @@ public class SolidusIntegration {
 
     static {
         nameToUuidCache = new ConcurrentHashMap();
+    }
+
+    /**
+     * Economy-wide aggregates computed inside Core with one SQL query (R28):
+     * count, mean balance, money supply, and the Gini coefficient - without
+     * materializing any balance rows. Returns null (inside a completed
+     * future) when Core is absent or predates the API, signaling callers to
+     * fall back to the legacy {@link #getTopBalances(int)} row pull.
+     */
+    public static CompletableFuture<EconomyStats> getEconomyStats() {
+        if (!solidusLoaded || apiInstance == null || getEconomyStatsHandle == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        try {
+            CompletableFuture<?> raw = (CompletableFuture<?>) getEconomyStatsHandle.invoke(apiInstance);
+            return raw.thenApply(obj -> {
+                if (obj == null) {
+                    return null;
+                }
+                try {
+                    int playerCount = (Integer)obj.getClass().getMethod("playerCount", new Class[0]).invoke(obj, new Object[0]);
+                    double avg = (Double)obj.getClass().getMethod("avgBalance", new Class[0]).invoke(obj, new Object[0]);
+                    double supply = (Double)obj.getClass().getMethod("totalSupply", new Class[0]).invoke(obj, new Object[0]);
+                    double gini = (Double)obj.getClass().getMethod("giniCoefficient", new Class[0]).invoke(obj, new Object[0]);
+                    return new EconomyStats(playerCount, avg, supply, gini);
+                }
+                catch (Exception e) {
+                    SolidusGovernanceMod.LOGGER.debug("Failed to map EconomyStats via reflection", (Throwable)e);
+                    return null;
+                }
+            });
+        }
+        catch (Throwable e) {
+            SolidusGovernanceMod.LOGGER.error("Failed to get economy stats", e);
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /** Mirror of Core's SQLiteStorage.EconomyStats (reflection-mapped). */
+    public record EconomyStats(int playerCount, double avgBalance, double totalSupply, double giniCoefficient) {
     }
 
     public record BalanceEntry(UUID uuid, int rank, String playerName, double balance) {
