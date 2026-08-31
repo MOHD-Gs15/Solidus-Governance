@@ -15,6 +15,8 @@ public class GovernanceAutomator {
     private volatile boolean lockdownActive = false;
     private volatile String lockdownReason = null;
     private volatile boolean autoFreezeEnabled = false;
+    /** Timestamp (ms) of the last anti-inflation tax raise - enforces the cooldown. */
+    private volatile long lastAntiInflationRaiseMs = 0L;
 
     public GovernanceAutomator(GovernanceEngine engine) {
         this.engine = engine;
@@ -64,6 +66,22 @@ public class GovernanceAutomator {
             }
             double d = avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
             if (avgBalance > threshold && currentAuctionRate < maxRate) {
+                // COOLDOWN FIX: the periodic check runs every ~60s, and every
+                // above-threshold check used to raise the auction rate by 0.01
+                // AND synchronously rewrite the config file - climbing to the
+                // 0.25 cap in ~20 minutes and hammering the disk along the way,
+                // with no administrator-visible breathing room. Raises are now
+                // separated by a configurable cooldown
+                // (automation.anti-inflation.cooldown-minutes, default 60).
+                long cooldownMs = this.engine.getConfig().getInt("automation.anti-inflation.cooldown-minutes", 60) * 60_000L;
+                long now = System.currentTimeMillis();
+                if (cooldownMs > 0 && now - this.lastAntiInflationRaiseMs < cooldownMs) {
+                    SolidusGovernanceMod.LOGGER.debug(
+                        "Anti-inflation: raise skipped (cooldown) - avg {} above threshold {}",
+                        String.format("%.2f", avgBalance), String.format("%.2f", threshold));
+                    return;
+                }
+                this.lastAntiInflationRaiseMs = now;
                 double newRate = Math.min(currentAuctionRate + 0.01, maxRate);
                 this.engine.getConfig().set("taxation.auction.rate", String.valueOf(newRate));
                 this.engine.getAuditLogger().logAutomation("ANTI_INFLATION_TAX_INCREASE", "avg_balance=" + String.format("%.2f", avgBalance) + ";threshold=" + threshold + ";old_rate=" + String.format("%.3f", currentAuctionRate) + ";new_rate=" + String.format("%.3f", newRate));
@@ -90,7 +108,18 @@ public class GovernanceAutomator {
             for (SolidusIntegration.BalanceEntry entry : balances) {
                 if (!(entry.balance() > maxBalance)) continue;
                 double excess = entry.balance() - maxBalance;
-                CompletionStage capChain = ((CompletableFuture)SolidusIntegration.setBalance(null, entry.playerName(), maxBalance).thenAccept(result -> {
+                // UUID-FIRST FIX: the cap used to call setBalance(null, playerName, ...)
+                // and let Core resolve the account BY NAME - on offline-mode servers
+                // or after a rename that can cap the WRONG player's balance (an
+                // irreversible intervention). Core >= 2.1.x leaderboard entries now
+                // carry the account's real UUID; only a genuinely old Core (no uuid
+                // accessor) degrades to name resolution, with a loud warning.
+                if (entry.uuid() == null) {
+                    SolidusGovernanceMod.LOGGER.warn(
+                        "Wealth cap: Core did not supply a UUID for '{}' - resolving by NAME (risky on offline-mode servers; upgrade Core to 2.1.x+)",
+                        entry.playerName());
+                }
+                CompletionStage capChain = ((CompletableFuture)SolidusIntegration.setBalance(entry.uuid(), entry.playerName(), maxBalance).thenAccept(result -> {
                     MinecraftServer srv = SolidusIntegration.getServer();
                     if (result != null && result.booleanValue()) {
                         if (this.engine != null && srv != null) {

@@ -227,7 +227,17 @@ public class SolidusIntegration {
                         int rank = (Integer)entry.getClass().getMethod("rank", new Class[0]).invoke(entry, new Object[0]);
                         String name = (String)entry.getClass().getMethod("playerName", new Class[0]).invoke(entry, new Object[0]);
                         double balance = (Double)entry.getClass().getMethod("balance", new Class[0]).invoke(entry, new Object[0]);
-                        result.add(new BalanceEntry(rank, name, balance));
+                        // Core >= 2.1.x BalanceEntry carries the player's UUID;
+                        // older Cores do not (accessor absent) - uuid stays null
+                        // and callers must degrade to name resolution knowingly.
+                        UUID uuid = null;
+                        try {
+                            uuid = (UUID)entry.getClass().getMethod("uuid", new Class[0]).invoke(entry, new Object[0]);
+                        } catch (NoSuchMethodException oldCore) {
+                            SolidusGovernanceMod.LOGGER.debug(
+                                "Core BalanceEntry has no uuid accessor (older Core) - wealth cap will resolve by name");
+                        }
+                        result.add(new BalanceEntry(uuid, rank, name, balance));
                     }
                     catch (Exception e) {
                         SolidusGovernanceMod.LOGGER.debug("Failed to map BalanceEntry via reflection", (Throwable)e);
@@ -246,6 +256,6 @@ public class SolidusIntegration {
         nameToUuidCache = new ConcurrentHashMap();
     }
 
-    public record BalanceEntry(int rank, String playerName, double balance) {
+    public record BalanceEntry(UUID uuid, int rank, String playerName, double balance) {
     }
 }

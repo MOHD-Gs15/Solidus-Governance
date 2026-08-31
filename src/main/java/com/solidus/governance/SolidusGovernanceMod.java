@@ -216,6 +216,18 @@ implements DedicatedServerModInitializer {
             treasuryManager.setServer(server);
             snapshotManager.setServer(server);
             SolidusIntegration.setServer(server);
+
+            // Belt-and-braces retry (idempotent - REGISTERED guard makes this a
+            // no-op if the SERVER_STARTING attempt already succeeded). The
+            // STARTING attempt could not succeed against Core builds that
+            // initialize SolidusAPI only at SERVER_STARTED, because
+            // SERVER_STARTING fires BEFORE any SERVER_STARTED callback ran.
+            // Core now initializes its API at mod-init time (so the STARTING
+            // attempt wins), but this retry keeps the bridge compatible with
+            // any older Core build and with unexpected init orders - before
+            // players connect, i.e. before the first real transaction.
+            CoreHookBridge.registerIfNeeded(this.engine);
+
             SimulationEngine simEngine = this.engine.getSimulationEngine();
             if (simEngine != null && config.getBool("simulation.enabled", false)) {
                 simEngine.start();
