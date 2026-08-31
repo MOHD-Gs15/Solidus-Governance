@@ -345,7 +345,7 @@ com.solidus.governance/
 │   └── EconomyEvent.java       — Event model, duration math
 ├── policy/
 │   ├── PolicyManager.java      — Save/load/preview with autosave
-│   ├── PolicyDatabase.java     — policies.db: stored presets
+│   ├── PolicyDatabase.java     — governance.db: economy_policies presets
 │   └── EconomyPolicy.java      — Key filtering, autosave expiry
 ├── rules/
 │   ├── RuleEngine.java         — Evaluation pulse, action executor
@@ -414,7 +414,7 @@ Transaction limits, Discord webhooks, economy events, policies, conditional rule
 
 ### Where is my data stored?
 
-Everything lives in `config/solidus-governance/`: `governance.db`, `limits.db`, `events.db`, `policies.db`, `rules.db` (all WAL-mode SQLite), `governance.properties`, `license.key` (you provide), and `snapshots/`.
+Everything lives in `config/solidus-governance/`: `governance.db` (audit trail + stored policies), `limits.db`, `events.db`, `tax_ledger.db`, `rules.db` (all WAL-mode SQLite), `governance.properties`, `license.key` (you provide), `snapshots/`, `backups/` (recovery runs), and `exports/` (audit CSV).
 
 ### What happens if the server crashes mid-operation?
 
