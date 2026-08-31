@@ -384,12 +384,15 @@ public class SimulationEngine {
             return -1;
         }
         try {
-            dbPath = server.getServerDirectory().normalize().resolve("solidus").resolve("economy.db");
-            if (!Files.exists(dbPath, new LinkOption[0])) {
-                String levelName = server.getWorldPath(LevelResource.ROOT).getFileName().toString();
-                dbPath = server.getServerDirectory().normalize().resolve(levelName).resolve("solidus").resolve("economy.db");
+            String levelName;
+            try {
+                levelName = server.getWorldPath(LevelResource.ROOT).getFileName().toString();
             }
-            if (!Files.exists(dbPath, new LinkOption[0])) {
+            catch (Exception e) {
+                levelName = null;
+            }
+            dbPath = resolveEconomyDbPath(server.getServerDirectory(), levelName);
+            if (dbPath == null) {
                 SolidusGovernanceMod.LOGGER.debug("Solidus economy database not found at expected paths");
                 return -1;
             }
@@ -435,6 +438,37 @@ public class SimulationEngine {
             SolidusGovernanceMod.LOGGER.debug("JDBC connection to Solidus economy database failed", (Throwable)e);
         }
         return -1;
+    }
+
+    /**
+     * Resolves Solidus Core's {@code economy.db}.
+     *
+     * <p>Core 2.x stores its databases in {@code <server dir>/config/solidus/}
+     * (ConfigManager.initialize resolves the game dir's config/solidus). The
+     * older {@code <server dir>/solidus/} and {@code <level>/solidus/} layouts
+     * are kept as fallbacks for installations that predate the config layout.
+     * Returns {@code null} when no candidate file exists.</p>
+     *
+     * <p>Package-private and Minecraft-free so tests can verify the search
+     * order directly.</p>
+     */
+    static Path resolveEconomyDbPath(Path serverDir, String levelName) {
+        Path root = serverDir.normalize();
+        Path configLayout = root.resolve("config").resolve("solidus").resolve("economy.db");
+        if (Files.exists(configLayout, new LinkOption[0])) {
+            return configLayout;
+        }
+        Path legacyRootLayout = root.resolve("solidus").resolve("economy.db");
+        if (Files.exists(legacyRootLayout, new LinkOption[0])) {
+            return legacyRootLayout;
+        }
+        if (levelName != null && !levelName.isEmpty()) {
+            Path legacyLevelLayout = root.resolve(levelName).resolve("solidus").resolve("economy.db");
+            if (Files.exists(legacyLevelLayout, new LinkOption[0])) {
+                return legacyLevelLayout;
+            }
+        }
+        return null;
     }
 
     private List<String> generateRecommendations(double gini, double supplyGrowthRate, double maxBalance, double avgBalance) {
