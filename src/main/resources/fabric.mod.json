@@ -4,7 +4,7 @@
   "version": "${version}",
   "name": "Solidus Governance",
   "description": "Auditing, interventions, limits, policies, recovery, and economy governance for Solidus.",
-  "authors": ["MOHD_Gs"],
+  "authors": ["MOHD-Gs15"],
   "contact": {
     "sources": "https://github.com/MOHD-Gs15/solidus-governance"
   },
