@@ -1,5 +1,6 @@
 # Solidus Governance — Server-Side Minecraft Fabric Mod
 
+[![Solidus Family](https://img.shields.io/badge/Solidus_Family-2.1.0-8B5CF6.svg)](VERSIONING.md)
 [![Platform](https://img.shields.io/badge/Platform-Fabric-blue.svg)](https://fabricmc.net/)
 [![Minecraft](https://img.shields.io/badge/Minecraft-26.1.x-green.svg)](https://www.minecraft.net/)
 [![Java](https://img.shields.io/badge/Java-25-orange.svg)](https://adoptium.net/)
@@ -101,7 +102,7 @@ Config-driven per-player transfer and auction limits with daily usage persistenc
 * Per-player admin reset, audited
 * Every rejected transaction is logged to the audit trail and (optionally) Discord
 
-> **Enforcement scope (Governance 1.2.0 + Core 2.1.0+)**: Governance registers a transaction hook with Core at server start, so the emergency trading lock and frozen accounts are **always enforced inside Core's `/pay`, auction, and shop flows** — a denied transaction never moves money, and its reason is shown to the player. Daily limit enforcement inside Core requires a premium license (in free mode limit checks pass through while usage stays tracked and audited). Taxes are collected on settled transfers (sender), auction sales (seller), and shop purchases (buyer) whenever `taxation.enabled=true`. On older Core versions (< 2.1.0) or standalone mode, Governance degrades gracefully to tracking, status views, and violation logging only.
+> **Enforcement scope (Governance 2.1.0 + Core 2.1.0+)**: Governance registers a transaction hook with Core at server start, so the emergency trading lock and frozen accounts are **always enforced inside Core's `/pay`, auction, and shop flows** — a denied transaction never moves money, and its reason is shown to the player. Daily limit enforcement inside Core requires a premium license (in free mode limit checks pass through while usage stays tracked and audited). Taxes are collected on settled transfers (sender), auction sales (seller), and shop purchases (buyer) whenever `taxation.enabled=true`. On older Core versions (< 2.1.0) or standalone mode, Governance degrades gracefully to tracking, status views, and violation logging only.
 
 ### Taxation
 
@@ -365,7 +366,7 @@ com.solidus.governance/
 │   └── PlayerProfile.java      — Profile model and formatters
 ├── integration/
 │   ├── SolidusIntegration.java — Reflection bridge to Solidus Core
-│   └── CoreHookBridge.java — Registers the 1.2.0 enforcement hook with Core 2.1.0+ (vetoes + taxes)
+│   └── CoreHookBridge.java — Registers the 2.1.0 enforcement hook with Core 2.1.0+ (vetoes + taxes)
 └── commands/
     └── GovernanceCommand.java  — /governance command tree
 ```
@@ -410,7 +411,7 @@ Transaction limits, Discord webhooks, economy events, policies, conditional rule
 
 ### Does freezing an account block Core's `/pay`?
 
-**Yes** (Governance 1.2.0 with Core 2.1.0+). Governance registers a transaction hook with Core at server start; Core consults it before every `/pay`, auction listing/purchase, and shop transaction, so frozen accounts, the emergency trading lock, and daily limits are enforced at the source — a denial aborts the transaction before any balance changes, with the reason shown to the player. Taxes on transfers, auction sales, and shop purchases are collected automatically after a transaction settles. On Core versions without the hook API, Governance falls back to standalone mode: freezes still apply to Governance-side operations, and limits remain tracked and logged but not enforced inside Core.
+**Yes** (Governance 2.1.0 with Core 2.1.0+). Governance registers a transaction hook with Core at server start; Core consults it before every `/pay`, auction listing/purchase, and shop transaction, so frozen accounts, the emergency trading lock, and daily limits are enforced at the source — a denial aborts the transaction before any balance changes, with the reason shown to the player. Taxes on transfers, auction sales, and shop purchases are collected automatically after a transaction settles. On Core versions without the hook API, Governance falls back to standalone mode: freezes still apply to Governance-side operations, and limits remain tracked and logged but not enforced inside Core.
 
 ### Where is my data stored?
 
