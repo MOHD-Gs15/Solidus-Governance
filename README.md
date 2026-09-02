@@ -26,8 +26,8 @@ Immutable audit trails · Deterministic recovery · Zero client installation · 
   "runtimePlatform": "Fabric Loader 0.19.4+",
   "license": "MIT",
   "description": "Server-side economy governance layer for Solidus Core: immutable audit logging, balance interventions, account freezes, transaction limits, taxation, emergency lockdown, economy events, policies, automation rules, and point-in-time rollback recovery. No client mods required.",
-  "author": { "@type": "Person", "name": "MOHD_Gs", "url": "https://github.com/mohd-gs" },
-  "url": "https://github.com/mohd-gs/Solidus-Governance",
+  "author": { "@type": "Person", "name": "MOHD-Gs15", "url": "https://github.com/MOHD-Gs15" },
+  "url": "https://github.com/MOHD-Gs15/Solidus-Governance",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
 }
 -->
@@ -59,11 +59,11 @@ Solidus Governance is the administration layer of the **Solidus Economy Ecosyste
 
 | Module | License | Description |
 |--------|---------|-------------|
-| [solidus-core](https://github.com/mohd-gs/solidus-core) | MIT | Economy engine, server shop, auction house |
-| [solidus-analytics](https://github.com/mohd-gs/solidus-analytics) | MIT | Economy intelligence dashboard, inflation tracking, fraud detection, live web dashboard (AES-256-GCM encrypted) |
-| [Solidus-Enforcer](https://github.com/mohd-gs/Solidus-Enforcer) | MIT | Bounty hunting, hunter license system, alliance rewards, autonomous anti-monopoly bounties |
+| [solidus-core](https://github.com/MOHD-Gs15/solidus-core) | MIT | Economy engine, server shop, auction house |
+| [solidus-analytics](https://github.com/MOHD-Gs15/solidus-analytics) | MIT | Economy intelligence dashboard, inflation tracking, fraud detection, live web dashboard (AES-256-GCM encrypted) |
+| [Solidus-Enforcer](https://github.com/MOHD-Gs15/Solidus-Enforcer) | MIT | Bounty hunting, hunter license system, alliance rewards, autonomous anti-monopoly bounties |
 | **Solidus-Governance** | MIT | **Economy administration, audit logging, taxation, recovery** (this repo) |
-| [solidus-territory](https://github.com/mohd-gs/solidus-territory) | MIT | Polygon-based land claiming, rent system, territory trading, visual particle borders |
+| [solidus-territory](https://github.com/MOHD-Gs15/solidus-territory) | MIT | Polygon-based land claiming, rent system, territory trading, visual particle borders |
 
 Governance integrates with Solidus Core through a **reflection-based bridge** — zero compile dependency, automatic activation when Core is present, graceful degradation to standalone mode when absent.
 
@@ -188,8 +188,8 @@ See [SECURITY.md](SECURITY.md) for the secrets policy — license keys, webhook 
 
 1. Install [Fabric Loader](https://fabricmc.net/use/) on your server
 2. Install [Fabric API](https://modrinth.com/mod/fabric-api) on the server
-3. Install [Solidus Core](https://github.com/mohd-gs/solidus-core/releases) — Governance reads and mutates its economy through the API bridge
-4. Download the latest Solidus Governance release from [Releases](https://github.com/mohd-gs/Solidus-Governance/releases)
+3. Install [Solidus Core](https://github.com/MOHD-Gs15/solidus-core/releases) — Governance reads and mutates its economy through the API bridge
+4. Download the latest Solidus Governance release from [Releases](https://github.com/MOHD-Gs15/Solidus-Governance/releases)
 5. Place the `.jar` file into your server's `mods/` folder
 6. Start the server — configuration is generated at `config/solidus-governance/governance.properties`
 
@@ -430,7 +430,7 @@ Practically nothing on the tick thread: the tick handler does constant-time puls
 
 | Platform | Link |
 | --- | --- |
-| GitHub Releases | [Latest Release](https://github.com/mohd-gs/Solidus-Governance/releases) |
+| GitHub Releases | [Latest Release](https://github.com/MOHD-Gs15/Solidus-Governance/releases) |
 | Modrinth | [MOHD_Gs on Modrinth](https://modrinth.com/user/MOHD_Gs) |
 
 ---
@@ -439,7 +439,7 @@ Practically nothing on the tick thread: the tick handler does constant-time puls
 
 Contributions are welcome.
 
-* Report issues via [GitHub Issues](https://github.com/mohd-gs/Solidus-Governance/issues)
+* Report issues via [GitHub Issues](https://github.com/MOHD-Gs15/Solidus-Governance/issues)
 * Suggest features or improvements
 * Submit pull requests
 
@@ -459,4 +459,4 @@ This project is licensed under the **MIT License** — see [LICENSE](LICENSE) fo
 
 ---
 
-Built by [MOHD_Gs](https://github.com/mohd-gs) · [Email](mailto:mohdmxmxm@gmail.com) · Discord: **mohd_gs** · Part of the [Solidus Economy Ecosystem](https://github.com/mohd-gs)
+Built by [MOHD-Gs15](https://github.com/MOHD-Gs15) · [Email](mailto:mohdmxmxm@gmail.com) · Discord: **mohd_gs** · Part of the [Solidus Economy Ecosystem](https://github.com/MOHD-Gs15)
