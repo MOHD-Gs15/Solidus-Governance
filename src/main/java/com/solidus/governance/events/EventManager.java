@@ -7,6 +7,7 @@ import com.solidus.governance.discord.WebhookManager;
 import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.events.EconomyEvent;
 import com.solidus.governance.events.EventDatabase;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -21,6 +22,10 @@ public class EventManager {
     private final GovernanceConfig config;
     private final EventDatabase database;
     private final GovernanceEngine engine;
+    /** Single lock covering check→capture→apply→insert: prevents two concurrent
+     *  creations of the same event type from capturing each other's modified
+     *  values as "original" (which would permanently strand a multiplier). */
+    private final Object createLock = new Object();
 
     public EventManager(GovernanceConfig config, EventDatabase database, GovernanceEngine engine) {
         this.config = config;
@@ -53,31 +58,31 @@ public class EventManager {
                 SolidusGovernanceMod.LOGGER.warn("Event creation rejected: modifier '{}' out of range (must be finite, > 0, <= 100)", (Object)modifier);
                 return null;
             }
-            synchronized (this.activeEvents) {
+            EconomyEvent event;
+            synchronized (this.createLock) {
+                // Overlap check, original-value capture, apply, and insert must be
+                // ONE critical section: with the check and the apply separated,
+                // two concurrent same-type creations both pass the check and the
+                // second one captures the FIRST's modified value as "original" -
+                // the last revert then restores the modified value permanently.
                 for (EconomyEvent existing : this.activeEvents.values()) {
                     if (!existing.getType().equals(normalizedType)) continue;
                     SolidusGovernanceMod.LOGGER.warn("Event creation rejected: a {} event is already active ('{}'). Overlapping same-type events would corrupt config revert state.", new Object[]{normalizedType, existing.getName()});
                     return null;
                 }
-            }
-            String eventId = UUID.randomUUID().toString();
-            long now = System.currentTimeMillis();
-            long endTime = now + durationMillis;
-            Map<String, String> originalValues = this.captureOriginalValues(normalizedType);
-            EconomyEvent event = new EconomyEvent(eventId, name, normalizedType, modifier, now, endTime, creatorUuid.toString(), creatorName, originalValues, true);
-            this.applyEventModifications(event);
-            Object object = this.activeEvents;
-            synchronized (object) {
+                String eventId = UUID.randomUUID().toString();
+                long now = System.currentTimeMillis();
+                long endTime = now + durationMillis;
+                Map<String, String> originalValues = this.captureOriginalValues(normalizedType);
+                event = new EconomyEvent(eventId, name, normalizedType, modifier, now, endTime, creatorUuid.toString(), creatorName, originalValues, true);
+                this.applyEventModifications(event);
                 this.activeEvents.put(eventId, event);
-            }
-            object = this.allEvents;
-            synchronized (object) {
                 this.allEvents.add(0, event);
+                this.database.saveEvent(event);
             }
-            this.database.saveEvent(event);
             AuditLogger auditLogger = this.engine.getAuditLogger();
             if (auditLogger != null) {
-                auditLogger.logConfigChange(creatorUuid, creatorName, "event." + normalizedType.toLowerCase(), originalValues.toString(), "modifier=" + modifier + ";duration=" + duration);
+                auditLogger.logConfigChange(creatorUuid, creatorName, "event." + normalizedType.toLowerCase(), event.getOriginalValues().toString(), "modifier=" + modifier + ";duration=" + duration);
             }
             if ((webhookManager = this.engine.getWebhookManager()) != null) {
                 webhookManager.sendAlert("AUTOMATION", "Economy Event Started: " + name, "Type: " + normalizedType + " | Modifier: " + modifier + " | Duration: " + event.getTotalDurationString() + " | Created by: " + creatorName);
@@ -286,6 +291,58 @@ public class EventManager {
             SolidusGovernanceMod.LOGGER.info("Reverted config: {} = {}", (Object)entry.getKey(), (Object)entry.getValue());
         }
         SolidusGovernanceMod.LOGGER.info("Reverted all config changes for event: {} ({})", (Object)event.getName(), (Object)event.getId());
+    }
+
+    /**
+     * STRANDED-EVENT SWEEP (audit round 3, C-1): reverts active events when
+     * the premium EventManager is NOT constructed (license lapse or
+     * events.enabled=false). Without this sweep, an event live at the moment
+     * premium disappears leaves its modified config values (2x shop rates,
+     * 0% taxes) stranded in governance.properties forever, because the only
+     * revert machinery lives inside the premium-gated EventManager.
+     *
+     * <p>Static on purpose: it must run without constructing an EventManager
+     * (the whole point). Opens the events database read/write, restores each
+     * active event's original values into the config, marks the event
+     * inactive, and records an audit entry per revert.</p>
+     *
+     * @return the number of stranded events reverted
+     */
+    public static int revertStrandedEvents(Path configDir, GovernanceConfig config, AuditLogger auditLogger) {
+        EventDatabase db = new EventDatabase(configDir);
+        try {
+            db.initialize();
+            List<EconomyEvent> active;
+            try {
+                active = db.loadActiveEvents();
+            } catch (Exception e) {
+                SolidusGovernanceMod.LOGGER.debug("Stranded-event sweep: no readable events database ({})", e.toString());
+                return 0;
+            }
+            int reverted = 0;
+            for (EconomyEvent event : active) {
+                Map<String, String> originals = event.getOriginalValues();
+                if (originals != null && !originals.isEmpty()) {
+                    for (Map.Entry<String, String> entry : originals.entrySet()) {
+                        config.set(entry.getKey(), entry.getValue());
+                    }
+                }
+                event.setActive(false);
+                db.updateEvent(event);
+                if (auditLogger != null) {
+                    auditLogger.logConfigChange(null, "System",
+                        "event.stranded." + event.getType().toLowerCase(),
+                        "active=true", "active=false;reverted=premium-lapse-or-disabled");
+                }
+                SolidusGovernanceMod.LOGGER.warn(
+                    "Stranded event reverted: {} ({}) - its config changes were restored because the Events subsystem is not active.",
+                    event.getName(), event.getId());
+                reverted++;
+            }
+            return reverted;
+        } finally {
+            db.shutdown();
+        }
     }
 
     public static long parseDuration(String duration) {

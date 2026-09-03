@@ -136,12 +136,63 @@ public class TaxEngine {
                         if (!treasuryUuid.isBlank()) {
                             try {
                                 UUID treasury = UUID.fromString(treasuryUuid);
+                                // D-3/B-4 fix (audit round 3): the deposit result used to be
+                                // IGNORED while a TREASURY_DEPOSIT audit row was written
+                                // unconditionally - a failed deposit silently destroyed the
+                                // player's money while the audit trail claimed success (exactly
+                                // what SECURITY.md forbids). The deposit is now checked; on
+                                // failure the debit is compensated back to the player, the
+                                // debt is re-parked for retry, and the audit trail records
+                                // what actually happened.
                                 treasuryTransfer = SolidusIntegration.addBalance(treasury, "Treasury", taxAmount)
-                                    .thenAccept(result -> {
-                                        MinecraftServer treasuryServer = this.getServer();
-                                        if (this.engine != null && treasuryServer != null) {
-                                            treasuryServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT", taxAmount));
+                                    .thenCompose(depositResult -> {
+                                        if (depositResult != null && depositResult >= 0.0) {
+                                            MinecraftServer treasuryServer = this.getServer();
+                                            if (this.engine != null && treasuryServer != null) {
+                                                treasuryServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT", taxAmount));
+                                            }
+                                            return CompletableFuture.completedFuture(null);
                                         }
+                                        // Deposit failed: refund the player so no money is destroyed,
+                                        // then re-park the debt for a later retry.
+                                        SolidusGovernanceMod.LOGGER.error(
+                                            "Treasury deposit of {} for {} ({} tax) FAILED - refunding the player and re-parking the debt",
+                                            taxAmount, playerName, taxType);
+                                        MinecraftServer failureServer = this.getServer();
+                                        if (this.engine != null && failureServer != null) {
+                                            failureServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT_FAILED", taxAmount));
+                                        }
+                                        this.sendDiscordAlert("TAXATION", "Treasury Deposit Failed",
+                                            "A " + taxType + " tax of " + String.format("%.2f", taxAmount) + " from " + playerName
+                                                + " was collected but the treasury credit failed. The player was refunded and the debt is re-parked.");
+                                        return SolidusIntegration.addBalance(playerUuid, playerName, taxAmount)
+                                            .thenAccept(refundResult -> {
+                                                MinecraftServer refundServer = this.getServer();
+                                                if (refundResult == null || refundResult < 0.0) {
+                                                    SolidusGovernanceMod.LOGGER.error(
+                                                        "CRITICAL: refund of {} to {} ALSO failed after a failed treasury deposit - the amount is in limbo and needs manual reconciliation",
+                                                        taxAmount, playerName);
+                                                    if (this.engine != null && refundServer != null) {
+                                                        refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND_FAILED", taxAmount));
+                                                    }
+                                                    return;
+                                                }
+                                                if (this.engine != null && refundServer != null) {
+                                                    refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND", taxAmount));
+                                                }
+                                                this.enqueuePendingTax(playerUuid, playerName, taxType, taxAmount,
+                                                    "treasury deposit failed; player refunded");
+                                            })
+                                            .exceptionally(refundEx -> {
+                                                SolidusGovernanceMod.LOGGER.error(
+                                                    "Refund after failed treasury deposit threw for {}", playerName, refundEx);
+                                                return null;
+                                            });
+                                    })
+                                    .exceptionally(depositEx -> {
+                                        SolidusGovernanceMod.LOGGER.error(
+                                            "Treasury deposit threw for {} ({})", playerName, depositEx.toString());
+                                        return null;
                                     });
                             } catch (IllegalArgumentException ex) {
                                 SolidusGovernanceMod.LOGGER.warn("Invalid treasury UUID in governance config: {}", treasuryUuid);
@@ -179,7 +230,14 @@ public class TaxEngine {
             collectNow(tax.playerUuid(), tax.playerName(), tax.taxType(), tax.amount())
                 .thenAccept(collected -> {
                     if (collected > 0.0) {
-                        this.ledger.markCollected(tax.id());
+                        // B-6 fix (audit round 3): markCollected used to be an async
+                        // fire-and-forget DELETE. A crash or SQL failure in that window
+                        // left the debt row behind AFTER the money had moved, so the next
+                        // sweep collected the SAME tax again. The completion mark is now
+                        // SYNCHRONOUS in this callback (the callback already runs off the
+                        // server thread), and a failed mark force-drops the row (the money
+                        // is collected; keeping the row would double-charge) with an ERROR log.
+                        this.ledger.markCollectedNow(tax.id());
                         SolidusGovernanceMod.LOGGER.info("Pending tax #{} collected on retry ({} for {})",
                             tax.id(), tax.amount(), tax.playerName());
                     } else {
@@ -212,10 +270,43 @@ public class TaxEngine {
         if (!Double.isFinite(rate) || rate <= 0.0 || !Double.isFinite(threshold) || threshold < 0.0) {
             return;
         }
+        // B-7 fix (audit round 3): the decay used to (a) resolve accounts BY NAME
+        // (wrong-account decay after a rename or on offline-mode servers - the same
+        // bug the wealth-cap automaton already fixed UUID-first), (b) decay the
+        // TREASURY account itself (draining collected tax revenue), and (c) mutate
+        // FROZEN accounts (an asset freeze must lock the balance in place).
+        String treasuryUuidRaw = this.engine.getConfig().getString("taxation.treasury.account", "");
+        UUID treasuryUuid = null;
+        if (!treasuryUuidRaw.isBlank()) {
+            try {
+                treasuryUuid = UUID.fromString(treasuryUuidRaw);
+            } catch (IllegalArgumentException ignored) {
+                // Already warned about in collectNow; skip here.
+            }
+        }
+        final UUID treasury = treasuryUuid;
         SolidusIntegration.getTopBalances(1000).thenCompose(balances -> {
             ArrayList<CompletableFuture<Void>> decayFutures = new ArrayList<>();
             for (SolidusIntegration.BalanceEntry entry : balances) {
-                CompletableFuture<Void> chain = SolidusIntegration.getBalance(null, entry.playerName())
+                // UUID-FIRST: skip entries whose account cannot be identified.
+                UUID entryUuid = entry.uuid();
+                if (entryUuid == null) {
+                    entryUuid = SolidusIntegration.resolvePlayerUuid(entry.playerName());
+                }
+                if (entryUuid == null) {
+                    SolidusGovernanceMod.LOGGER.warn(
+                        "Wealth decay: could not resolve a UUID for '{}' - skipping (name-based decay can hit the wrong account after renames)",
+                        entry.playerName());
+                    continue;
+                }
+                if (entryUuid.equals(treasury)) {
+                    continue; // never decay the tax treasury
+                }
+                if (this.engine.getAccountFreezer() != null && this.engine.getAccountFreezer().isFrozen(entryUuid)) {
+                    continue; // a frozen balance is locked in place
+                }
+                final UUID decayUuid = entryUuid;
+                CompletableFuture<Void> chain = SolidusIntegration.getBalance(decayUuid, entry.playerName())
                     .thenCompose(balanceBefore -> {
                         if (balanceBefore == null || !Double.isFinite(balanceBefore) || balanceBefore <= threshold) {
                             return CompletableFuture.completedFuture(null);
@@ -224,12 +315,11 @@ public class TaxEngine {
                         if (!Double.isFinite(decay) || decay <= 0.0) {
                             return CompletableFuture.completedFuture(null);
                         }
-                        return SolidusIntegration.subtractBalance(null, entry.playerName(), decay).thenAccept(newBalance -> {
+                        return SolidusIntegration.subtractBalance(decayUuid, entry.playerName(), decay).thenAccept(newBalance -> {
                             if (newBalance != null && Double.isFinite(newBalance) && newBalance >= 0.0) {
-                                UUID resolvedUuid = SolidusIntegration.resolvePlayerUuid(entry.playerName());
                                 MinecraftServer server = this.getServer();
                                 if (this.engine != null && server != null) {
-                                    server.execute(() -> this.engine.getAuditLogger().logWealthDecay(resolvedUuid, entry.playerName(), decay, balanceBefore, newBalance));
+                                    server.execute(() -> this.engine.getAuditLogger().logWealthDecay(decayUuid, entry.playerName(), decay, balanceBefore, newBalance));
                                 }
                             }
                         });

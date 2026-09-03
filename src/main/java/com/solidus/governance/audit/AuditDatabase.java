@@ -2,6 +2,9 @@ package com.solidus.governance.audit;
 
 import com.solidus.governance.SolidusGovernanceMod;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -15,6 +18,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 public class AuditDatabase {
@@ -28,14 +32,24 @@ public class AuditDatabase {
 
     private final String databaseUrl;
     private final Path configDir;
-    private final ExecutorService executor;
+    private final Path dbFile;
+    /** Recreated on re-initialize: BackupManager's live restore calls
+     *  shutdown() then initialize(), and a terminated executor would turn
+     *  every later audit write into a caller-thread crash (money mutations
+     *  would then land with NO audit rows and no command feedback). */
+    private volatile ExecutorService executor;
     private volatile Connection connection;
     private volatile boolean initialized = false;
 
     public AuditDatabase(Path configDir) {
         this.databaseUrl = "jdbc:sqlite:" + configDir.resolve(DB_NAME).toString();
         this.configDir = configDir;
-        this.executor = Executors.newSingleThreadExecutor(r -> {
+        this.dbFile = configDir.resolve(DB_NAME);
+        this.executor = newAuditExecutor();
+    }
+
+    private static ExecutorService newAuditExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "Solidus-Governance-DB");
             t.setDaemon(true);
             return t;
@@ -44,6 +58,13 @@ public class AuditDatabase {
 
     public void initialize() {
         try {
+            // A-1 fix (audit round 3): initialize() is also the RE-initialize
+            // path after a live restore. Recreate the executor if the previous
+            // shutdown() terminated it, so audit writes never hit a dead queue.
+            ExecutorService current = this.executor;
+            if (current == null || current.isShutdown()) {
+                this.executor = newAuditExecutor();
+            }
             this.connection = DriverManager.getConnection(this.databaseUrl);
             try (Statement stmt = this.connection.createStatement();){
                 stmt.execute("PRAGMA journal_mode=WAL");
@@ -63,10 +84,27 @@ public class AuditDatabase {
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)");
             }
             this.initialized = true;
+            restrictFilePermissions();
             SolidusGovernanceMod.LOGGER.info("Governance audit database initialized.");
         }
         catch (SQLException e) {
             SolidusGovernanceMod.LOGGER.error("Failed to initialize governance database!", (Throwable)e);
+        }
+    }
+
+    /** Best-effort 0600 on the DB file: it holds balances, freezes and admin identities. */
+    private void restrictFilePermissions() {
+        try {
+            if (java.nio.file.Files.exists(this.dbFile)) {
+                java.nio.file.attribute.PosixFileAttributeView view =
+                    java.nio.file.Files.getFileAttributeView(this.dbFile,
+                        java.nio.file.attribute.PosixFileAttributeView.class);
+                if (view != null) {
+                    view.setPermissions(PosixFilePermissions.fromString("rw-------"));
+                }
+            }
+        } catch (Exception e) {
+            SolidusGovernanceMod.LOGGER.debug("Could not restrict governance.db permissions ({})", e.toString());
         }
     }
 
@@ -95,32 +133,55 @@ public class AuditDatabase {
         if (!this.initialized) {
             return;
         }
-        this.executor.submit(() -> {
-            try {
-                String sql = "    INSERT INTO audit_log (timestamp, admin_uuid, admin_name, action, category,\n        target_uuid, target_name, before_value, after_value, details, rollback_of)\n    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n";
-                try (PreparedStatement ps = this.connection.prepareStatement(sql);){
-                    ps.setLong(1, entry.timestamp);
-                    ps.setString(2, entry.adminUuid);
-                    ps.setString(3, entry.adminName);
-                    ps.setString(4, entry.action);
-                    ps.setString(5, entry.category);
-                    ps.setString(6, entry.targetUuid);
-                    ps.setString(7, entry.targetName);
-                    ps.setString(8, entry.beforeValue);
-                    ps.setString(9, entry.afterValue);
-                    ps.setString(10, entry.details);
-                    if (entry.rollbackOf > 0) {
-                        ps.setInt(11, entry.rollbackOf);
-                    } else {
-                        ps.setNull(11, 4);
-                    }
-                    ps.executeUpdate();
+        try {
+            this.executor.submit(() -> {
+                try {
+                    this.insertAuditEntry(entry);
                 }
+                catch (SQLException e) {
+                    // A-7 hardening: an audit row lost to a DB failure is an
+                    // integrity incident, not a silent no-op.
+                    SolidusGovernanceMod.LOGGER.error("Failed to log audit entry (action={}, target={})",
+                        entry.action, entry.targetName, e);
+                }
+            });
+        }
+        catch (RejectedExecutionException rejected) {
+            // A-1 defense-in-depth: never let a dead executor crash the caller
+            // (the server thread). Attempt a synchronous insert so the audit
+            // row survives even without the worker thread.
+            SolidusGovernanceMod.LOGGER.error(
+                "Audit executor rejected the write - attempting a synchronous audit insert.", rejected);
+            try {
+                this.insertAuditEntry(entry);
             }
             catch (SQLException e) {
-                SolidusGovernanceMod.LOGGER.error("Failed to log audit entry", (Throwable)e);
+                SolidusGovernanceMod.LOGGER.error("Synchronous audit fallback failed - audit row LOST (action={}, target={})",
+                    entry.action, entry.targetName, e);
             }
-        });
+        }
+    }
+
+    private void insertAuditEntry(AuditEntry entry) throws SQLException {
+        String sql = "    INSERT INTO audit_log (timestamp, admin_uuid, admin_name, action, category,\n        target_uuid, target_name, before_value, after_value, details, rollback_of)\n    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n";
+        try (PreparedStatement ps = this.connection.prepareStatement(sql);){
+            ps.setLong(1, entry.timestamp);
+            ps.setString(2, entry.adminUuid);
+            ps.setString(3, entry.adminName);
+            ps.setString(4, entry.action);
+            ps.setString(5, entry.category);
+            ps.setString(6, entry.targetUuid);
+            ps.setString(7, entry.targetName);
+            ps.setString(8, entry.beforeValue);
+            ps.setString(9, entry.afterValue);
+            ps.setString(10, entry.details);
+            if (entry.rollbackOf > 0) {
+                ps.setInt(11, entry.rollbackOf);
+            } else {
+                ps.setNull(11, 4);
+            }
+            ps.executeUpdate();
+        }
     }
 
     public List<AuditEntry> getRecentAuditLogs(int limit) {

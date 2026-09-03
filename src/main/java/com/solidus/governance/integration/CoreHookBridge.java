@@ -11,7 +11,9 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import net.minecraft.server.MinecraftServer;
 
 /**
  * CoreHookBridge - Registers Solidus Governance as a
@@ -273,6 +275,27 @@ public final class CoreHookBridge {
                         UUID seller = (UUID) args[0];
                         String sellerName = (String) args[1];
                         double price = (Double) args[4];
+
+                        // B-2 fix (audit round 3): Core's settlement moves the buyer's
+                        // money straight into the seller's balance WITHOUT consulting
+                        // allowTransfer (the auction flow deliberately skips the generic
+                        // transfer hooks), and allowAuctionPurchase only vetoes the BUYER.
+                        // A frozen seller's pre-existing listings therefore kept funneling
+                        // money into a frozen ("asset-frozen") account - laundering into
+                        // untouchable escrow. CoreHookBridge's own freeze contract states
+                        // "a frozen account must not be able to receive funds", so the
+                        // proceeds of a settlement onto a frozen seller are clawed back
+                        // into the treasury here, with a full audit trail. New listings
+                        // are already blocked by the allowAuctionListing freeze veto;
+                        // auction tax on the frozen seller is skipped (their proceeds are
+                        // escrowed - charging tax out of pre-existing funds would
+                        // double-punish the freeze).
+                        AccountFreezer freezer = engine.getAccountFreezer();
+                        if (freezer != null && seller != null && freezer.isFrozen(seller)) {
+                            escrowFrozenAuctionProceeds(seller, sellerName, price);
+                            return null;
+                        }
+
                         collectTax("AUCTION_SALE", seller, sellerName,
                             engine.getTaxEngine() != null
                                 ? engine.getTaxEngine().calculateAuctionTax(price) : 0.0);
@@ -328,6 +351,70 @@ public final class CoreHookBridge {
                 SolidusGovernanceMod.LOGGER.warn(
                     "CoreHookBridge: hook method {} threw - failing open. {}", name, t.toString());
                 return genericDefault(method);
+            }
+        }
+
+        /**
+         * Claw back auction proceeds that landed on a FROZEN seller (B-2, audit
+         * round 3) and escrow them in the treasury. Money-conserving, fully
+         * audited (before/after recorded), and reversible by an admin: unfreeze
+         * the account and re-credit from the treasury using the audit row.
+         */
+        private void escrowFrozenAuctionProceeds(UUID seller, String sellerName, double price) {
+            SolidusGovernanceMod.LOGGER.warn(
+                "CoreHookBridge: auction proceeds of {} landed on frozen account '{}' ({}), escrowing them into the treasury",
+                price, sellerName, seller);
+            try {
+                SolidusIntegration.getBalance(seller, sellerName)
+                    .thenCompose(before -> SolidusIntegration.subtractBalance(seller, sellerName, price)
+                        .thenCompose(afterBalance -> {
+                            boolean clawedBack = afterBalance != null && Double.isFinite(afterBalance) && afterBalance >= 0.0;
+                            MinecraftServer srv = SolidusIntegration.getServer();
+                            if (engine != null && srv != null) {
+                                srv.execute(() -> engine.getAuditLogger().logBalanceChange(
+                                    null, "System", seller, sellerName, "FROZEN_PROCEEDS_ESCROW",
+                                    before != null ? before : -1.0,
+                                    afterBalance != null ? afterBalance : -1.0,
+                                    -price));
+                            }
+                            if (!clawedBack) {
+                                SolidusGovernanceMod.LOGGER.error(
+                                    "CoreHookBridge: could not claw back {} from frozen seller {} (balance {})",
+                                    price, sellerName, afterBalance);
+                                return CompletableFuture.completedFuture(null);
+                            }
+                            // Escrow into the treasury when one is configured.
+                            String treasuryUuid = engine.getConfig().getString("taxation.treasury.account", "");
+                            if (treasuryUuid.isBlank()) {
+                                SolidusGovernanceMod.LOGGER.warn(
+                                    "CoreHookBridge: no treasury configured - frozen-seller proceeds of {} were removed from {} and burned. Configure taxation.treasury.account to escrow them instead.",
+                                    price, sellerName);
+                                return CompletableFuture.completedFuture(null);
+                            }
+                            try {
+                                UUID treasury = UUID.fromString(treasuryUuid);
+                                return SolidusIntegration.addBalance(treasury, "Treasury", price)
+                                    .thenAccept(deposit -> {
+                                        MinecraftServer srv2 = SolidusIntegration.getServer();
+                                        if (engine != null && srv2 != null) {
+                                            srv2.execute(() -> engine.getAuditLogger().logTreasuryOperation(
+                                                null, "System", "FROZEN_PROCEEDS_ESCROW", price));
+                                        }
+                                    });
+                            } catch (IllegalArgumentException badTreasury) {
+                                SolidusGovernanceMod.LOGGER.warn(
+                                    "CoreHookBridge: invalid treasury UUID '{}' - escrow skipped", treasuryUuid);
+                                return CompletableFuture.completedFuture(null);
+                            }
+                        }))
+                    .exceptionally(ex -> {
+                        SolidusGovernanceMod.LOGGER.error(
+                            "CoreHookBridge: frozen-proceeds escrow failed for {} ({})", sellerName, ex.toString());
+                        return null;
+                    });
+            } catch (Throwable t) {
+                SolidusGovernanceMod.LOGGER.error(
+                    "CoreHookBridge: frozen-proceeds escrow dispatch failed for {}", sellerName, t);
             }
         }
 

@@ -71,6 +71,16 @@ public class InterventionManager {
     }
 
     public CompletableFuture<Boolean> setBalance(UUID adminUuid, String adminName, UUID targetUuid, String targetName, double amount) {
+        // B-3 fix (audit round 3): add and remove both refuse frozen accounts,
+        // but set bypassed the freeze - contradicting the documented freeze
+        // contract ("all three have freeze checks"). The rollback/recovery
+        // paths call SolidusIntegration.setBalance directly and remain exempt
+        // by design: restoring a pre-incident balance must work on frozen
+        // accounts. The rollback in InterventionManager.forceReverse also
+        // bypasses this check on purpose for the same reason.
+        if (this.engine.getAccountFreezer().isFrozen(targetUuid)) {
+            return CompletableFuture.completedFuture(false);
+        }
         return SolidusIntegration.getBalance(targetUuid, targetName).thenCompose(currentBalance -> {
             if (currentBalance < 0.0) {
                 return CompletableFuture.completedFuture(false);

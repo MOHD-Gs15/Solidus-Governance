@@ -20,13 +20,18 @@ import java.util.concurrent.TimeUnit;
 public class EventDatabase {
     private static final String DB_NAME = "events.db";
     private final String databaseUrl;
-    private final ExecutorService executor;
+    /** Recreated on re-initialize (live restore calls shutdown() then initialize()). */
+    private volatile ExecutorService executor;
     private volatile Connection connection;
     private volatile boolean initialized = false;
 
     public EventDatabase(Path configDir) {
         this.databaseUrl = "jdbc:sqlite:" + configDir.resolve(DB_NAME).toString();
-        this.executor = Executors.newSingleThreadExecutor(r -> {
+        this.executor = newExecutor();
+    }
+
+    private static ExecutorService newExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "Solidus-Events-DB");
             t.setDaemon(true);
             return t;
@@ -35,6 +40,11 @@ public class EventDatabase {
 
     public void initialize() {
         try {
+            // A-1 fix: recreate the executor if a previous shutdown() terminated it.
+            ExecutorService current = this.executor;
+            if (current == null || current.isShutdown()) {
+                this.executor = newExecutor();
+            }
             this.connection = DriverManager.getConnection(this.databaseUrl);
             try (Statement stmt = this.connection.createStatement();){
                 stmt.execute("PRAGMA journal_mode=WAL");

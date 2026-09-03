@@ -33,6 +33,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileAttribute;
+import java.util.Optional;
 import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -45,7 +46,8 @@ import org.slf4j.LoggerFactory;
 public class SolidusGovernanceMod
 implements DedicatedServerModInitializer {
     public static final String MOD_ID = "solidus-governance";
-    public static final String VERSION = "1.2.0";
+    /** Synced from Fabric mod metadata at init (falls back to the family patch version). */
+    public static final String VERSION = resolveVersion();
     public static final Logger LOGGER = LoggerFactory.getLogger((String)"solidus-governance");
     private GovernanceEngine engine;
     private LimitsDatabase limitsDatabase;
@@ -69,9 +71,8 @@ implements DedicatedServerModInitializer {
         AuditDatabase auditDatabase = new AuditDatabase(configDir);
         auditDatabase.initialize();
         AuditLogger auditLogger = new AuditLogger(auditDatabase);
-        LicenseVerifier licenseVerifier = new LicenseVerifier();
-        Path licensePath = configDir.resolve("license.key");
-        licenseVerifier.verify(licensePath);
+        LicenseVerifier licenseVerifier = new LicenseVerifier(configDir);
+        licenseVerifier.initialize();
         AccountFreezer accountFreezer = new AccountFreezer();
         InterventionManager interventionManager = new InterventionManager(null);
         TaxEngine taxEngine = new TaxEngine(null);
@@ -151,6 +152,7 @@ implements DedicatedServerModInitializer {
         this.engine.setBackupManager(backupManager);
         LOGGER.info("Backup Manager: ENABLED (auto every recovery.backup.auto-interval-hours, verified VACUUM INTO copies)");
         WebhookManager webhookManager = new WebhookManager(config);
+        webhookManager.setPremiumGate(licenseVerifier::isPremiumEnabled);
         this.engine.setWebhookManager(webhookManager);
         if (webhookManager.isDiscordEnabled() && licenseVerifier.isPremiumEnabled()) {
             LOGGER.info("Discord Webhooks: ENABLED");
@@ -165,6 +167,15 @@ implements DedicatedServerModInitializer {
             eventManager.loadFromDatabase();
             LOGGER.info("Economy Events: ENABLED ({} active events)", (Object)eventManager.getActiveEvents().size());
         } else {
+            // STRANDED-EVENT SWEEP (audit round 3): an active event writes its
+            // multipliers directly into governance.properties. The revert
+            // machinery only lives inside the premium-gated EventManager, so a
+            // license lapse or events.enabled=false while an event is live
+            // would strand 2x shop rates / 0% taxes in the config FOREVER.
+            // When the premium path is not constructed, revert any active
+            // events' original values and close them out so the config always
+            // returns to its pre-event state.
+            EventManager.revertStrandedEvents(configDir, config, auditLogger);
             LOGGER.info("Economy Events: DISABLED{}", (Object)(licenseVerifier.isPremiumEnabled() ? " (disabled in config)" : " (requires premium license)"));
         }
         if (licenseVerifier.isPremiumEnabled() && config.getBool("policies.enabled", true)) {
@@ -263,5 +274,24 @@ implements DedicatedServerModInitializer {
             }
         });
         LOGGER.info("Solidus Governance initialized successfully. Premium: {}", (Object)(licenseVerifier.isPremiumEnabled() ? "ACTIVE" : "FREE MODE"));
+    }
+
+    private static String resolveVersion() {
+        try {
+            Optional<net.fabricmc.loader.api.ModContainer> container =
+                FabricLoader.getInstance().getModContainer(MOD_ID);
+            if (container.isPresent()) {
+                net.fabricmc.loader.api.metadata.ModMetadata metadata = container.get().getMetadata();
+                if (metadata != null) {
+                    String friendly = metadata.getVersion().getFriendlyString();
+                    if (friendly != null && !friendly.isBlank() && !friendly.startsWith("${")) {
+                        return friendly;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Metadata unavailable (e.g. plain unit tests) - fall back.
+        }
+        return "2.1.1";
     }
 }

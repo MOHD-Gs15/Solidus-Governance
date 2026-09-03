@@ -101,3 +101,13 @@ leaves the original recoverable from `backups/quarantine/`.
 - Restoring `economy.db` while players are online is safe but pointless until
   restart — schedule core-database restores for maintenance windows when
   possible.
+- **WAL sidecars (audit round 3):** live SQLite databases keep recent writes in
+  `<db>-wal` / `<db>-shm` sidecar files. A restore now quarantines those
+  sidecars together with the main file; before this fix, a stale hot WAL left
+  next to a freshly restored copy was REPLAYED onto it on the next open,
+  silently resurrecting the post-backup transactions the restore was meant to
+  remove (or corrupting the file).
+- Live restores of Governance-owned databases re-initialize their write
+  executors, so audit logging keeps working after `governance.db` or
+  `limits.db` is restored in place (previously every later audit write hit a
+  terminated executor and money mutations could land with no audit rows).

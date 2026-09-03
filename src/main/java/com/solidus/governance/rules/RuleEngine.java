@@ -16,6 +16,22 @@ import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.server.MinecraftServer;
 
 public class RuleEngine {
+    /**
+     * B-10 fix (audit round 3): rules execute with SYSTEM privileges, so a
+     * `set_config` action could rewrite ANY config key - flipping
+     * enforcement.fail-closed to false, redirecting the treasury UUID, or
+     * pointing discord webhooks elsewhere. Rule actions are admin-authored,
+     * but the blast radius of a typo'd or malicious rule must not include the
+     * enforcement switches themselves. Only economy-tuning keys are allowed;
+     * the deny is audited.
+     */
+    private static final java.util.Set<String> RULE_CONFIG_ALLOWLIST = java.util.Set.of(
+        "taxation.transfer.rate", "taxation.auction.rate", "taxation.shop.rate",
+        "taxation.wealth-decay.enabled", "taxation.wealth-decay.rate", "taxation.wealth-decay.threshold",
+        "automation.enabled", "automation.anti-inflation.enabled", "automation.anti-inflation.threshold",
+        "automation.anti-inflation.cooldown-minutes", "automation.wealth-cap.enabled", "automation.wealth-cap.amount",
+        "automation.auto-freeze.enabled", "discord.alert-threshold.intervention",
+        "limits.transfer.daily-max", "limits.transfer.min", "limits.transfer.max", "limits.auction.daily-max");
     private final GovernanceEngine engine;
     private final RuleDatabase database;
     private final Map<String, AutomationRule> rules = new ConcurrentHashMap<String, AutomationRule>();
@@ -240,6 +256,17 @@ public class RuleEngine {
             case "set_config": {
                 if (srv != null) {
                     srv.execute(() -> {
+                        if (action.key() == null || !RULE_CONFIG_ALLOWLIST.contains(action.key())) {
+                            // B-10: rules run with system privileges - enforcement
+                            // switches, treasury identity, audit and webhook keys are
+                            // out of reach for rule actions. Deny + audit the attempt.
+                            SolidusGovernanceMod.LOGGER.warn(
+                                "Rule action set_config DENIED for key '{}' (not on the rule allowlist)",
+                                action.key());
+                            this.engine.getAuditLogger().logAutomation("RULE_ACTION_DENIED",
+                                "key=" + action.key() + ";reason=not-allowlisted");
+                            return;
+                        }
                         String beforeValue = this.engine.getConfig().getString(action.key(), "");
                         this.engine.getConfig().set(action.key(), action.value());
                         this.engine.getAuditLogger().logConfigChange(null, "RuleEngine", action.key(), beforeValue, action.value());
@@ -251,6 +278,14 @@ public class RuleEngine {
             case "enable_feature": {
                 if (srv != null) {
                     srv.execute(() -> {
+                        if (action.key() == null || !RULE_CONFIG_ALLOWLIST.contains(action.key())) {
+                            SolidusGovernanceMod.LOGGER.warn(
+                                "Rule action enable_feature DENIED for key '{}' (not on the rule allowlist)",
+                                action.key());
+                            this.engine.getAuditLogger().logAutomation("RULE_ACTION_DENIED",
+                                "key=" + action.key() + ";reason=not-allowlisted");
+                            return;
+                        }
                         String beforeValue = this.engine.getConfig().getString(action.key(), "");
                         this.engine.getConfig().set(action.key(), "true");
                         this.engine.getAuditLogger().logConfigChange(null, "RuleEngine", action.key(), beforeValue, "true");
@@ -262,6 +297,14 @@ public class RuleEngine {
             case "disable_feature": {
                 if (srv != null) {
                     srv.execute(() -> {
+                        if (action.key() == null || !RULE_CONFIG_ALLOWLIST.contains(action.key())) {
+                            SolidusGovernanceMod.LOGGER.warn(
+                                "Rule action disable_feature DENIED for key '{}' (not on the rule allowlist)",
+                                action.key());
+                            this.engine.getAuditLogger().logAutomation("RULE_ACTION_DENIED",
+                                "key=" + action.key() + ";reason=not-allowlisted");
+                            return;
+                        }
                         String beforeValue = this.engine.getConfig().getString(action.key(), "");
                         this.engine.getConfig().set(action.key(), "false");
                         this.engine.getAuditLogger().logConfigChange(null, "RuleEngine", action.key(), beforeValue, "false");

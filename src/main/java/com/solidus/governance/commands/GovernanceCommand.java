@@ -17,6 +17,7 @@ import com.solidus.governance.events.EventManager;
 import com.solidus.governance.license.LicenseVerifier;
 import com.solidus.governance.limits.TransactionLimits;
 import com.solidus.governance.policy.EconomyPolicy;
+import com.solidus.governance.profile.ProfileGenerator;
 import com.solidus.governance.policy.PolicyManager;
 import com.solidus.governance.recovery.BackupManager;
 import com.solidus.governance.rules.AutomationRule;
@@ -51,6 +52,13 @@ public class GovernanceCommand {
     private static final UUID CONSOLE_UUID = UUID.nameUUIDFromBytes("CONSOLE".getBytes());
     private static final List<String> VALID_CONDITION_TYPES = List.of("avg_balance_above", "avg_balance_below", "inflation_rate_above", "transaction_volume_24h_above", "transaction_volume_24h_below", "total_money_supply_above", "total_money_supply_below", "player_count_above", "player_count_below", "gini_coefficient_above", "gini_coefficient_below");
     private static final List<String> VALID_ACTION_TYPES = List.of("set_config", "enable_feature", "disable_feature", "activate_lockdown", "deactivate_lockdown", "increase_tax", "decrease_tax", "send_discord_alert");
+    /** C-3/C-4 fix (audit round 3): expensive admin queries (profile pulls a
+     *  large leaderboard scan, CSV export materializes up to 200k rows) were
+     *  repeatable every tick by any OP - a memory/CPU denial of service. Both
+     *  now carry a 30-second cooldown, mirroring solidus-core's export guard. */
+    private static final long EXPENSIVE_COMMAND_COOLDOWN_MS = 30_000L;
+    private static volatile long lastProfileCommandMs = 0L;
+    private static volatile long lastAuditExportMs = 0L;
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher, GovernanceEngine engine) {
         dispatcher.register(Commands.literal("governance")
@@ -58,7 +66,10 @@ public class GovernanceCommand {
             .executes(context -> executeStatus(context, engine))
             .then(Commands.literal("license")
                 .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
-                .executes(context -> executeLicense(context, engine)))
+                .executes(context -> executeLicense(context, engine))
+                .then(Commands.literal("reverify")
+                    .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
+                    .executes(context -> executeLicenseReverify(context, engine))))
             .then(Commands.literal("fingerprint")
                 .requires(source -> source.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.ADMINS)))
                 .executes(context -> executeFingerprint(context)))
@@ -434,22 +445,40 @@ public class GovernanceCommand {
     private static int executeLicense(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         LicenseVerifier verifier = engine.getLicenseVerifier();
+        // isPremiumEnabled lazily re-checks expiry, so the status below is current.
+        verifier.isPremiumEnabled();
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550 License Status \u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
         if (verifier.isPremiumEnabled()) {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Status: VERIFIED", ChatFormatting.GREEN));
             if (verifier.getLicenseeName() != null) {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Licensed to: " + verifier.getLicenseeName(), ChatFormatting.WHITE));
             }
-            if (verifier.getExpiryDate() != null) {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Expires: " + String.valueOf(verifier.getExpiryDate()), ChatFormatting.WHITE));
-            }
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Expires: "
+                + (verifier.isPerpetual() ? "never (perpetual)" : String.valueOf(verifier.getExpiryDate())), ChatFormatting.WHITE));
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Product: " + LicenseVerifier.PRODUCT_ID, ChatFormatting.DARK_GRAY));
         } else {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Status: " + verifier.getState().name(), ChatFormatting.RED));
             if (verifier.getErrorMessage() != null) {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Error: " + verifier.getErrorMessage(), ChatFormatting.DARK_RED));
             }
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Re-verify after replacing config/solidus-governance/license.key: /governance license reverify", ChatFormatting.GRAY));
         }
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
+        return 1;
+    }
+
+    /** Re-reads license.key and re-verifies without a restart (D-10 companion). */
+    private static int executeLicenseReverify(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
+        CommandSourceStack source = (CommandSourceStack)context.getSource();
+        LicenseVerifier verifier = engine.getLicenseVerifier();
+        LicenseVerifier.VerificationState result = verifier.forceReverify();
+        if (result == LicenseVerifier.VerificationState.VERIFIED) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  License re-verified: VERIFIED"
+                + (verifier.isPerpetual() ? " (perpetual)" : " (expires " + verifier.getExpiryDate() + ")"), ChatFormatting.GREEN));
+        } else {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  License re-verification failed: " + result.name()
+                + (verifier.getErrorMessage() != null ? " - " + verifier.getErrorMessage() : ""), ChatFormatting.RED));
+        }
         return 1;
     }
 
@@ -464,14 +493,30 @@ public class GovernanceCommand {
         ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
         double amount = DoubleArgumentType.getDouble(context, (String)"amount");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
+        // C-5 fix: reject non-finite amounts at the gate with an honest message.
+        // (Core's isValidBalance backstop would reject them too, but as a silent
+        // generic failure - and Infinity would pass this command's threshold
+        // comparisons before Core ever saw it.)
+        if (!Double.isFinite(amount)) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Invalid amount: " + amount + ". Must be a finite number.", ChatFormatting.RED));
+            return 0;
+        }
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
-        engine.getInterventionManager().addBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount).thenAccept(newBalance -> source.getServer().execute(() -> {
-            if (newBalance >= 0.0) {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Added " + amount + " to " + player.getName().getString() + ". New balance: " + String.format("%.2f", newBalance), ChatFormatting.GREEN));
-            } else {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to add balance. Account may be frozen.", ChatFormatting.RED));
-            }
-        }));
+        // A-10 fix: an exceptional completion (audit DB down after a live
+        // restore, reflection failure) used to vanish silently - the admin saw
+        // no feedback, assumed failure, and RETRIED, double-applying money.
+        engine.getInterventionManager().addBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount)
+            .thenAccept(newBalance -> source.getServer().execute(() -> {
+                if (newBalance >= 0.0) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Added " + amount + " to " + player.getName().getString() + ". New balance: " + String.format("%.2f", newBalance), ChatFormatting.GREEN));
+                } else {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to add balance. Account may be frozen.", ChatFormatting.RED));
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Intervention FAILED after the money may have moved - DO NOT blindly retry. Verify the current balance first: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -479,14 +524,23 @@ public class GovernanceCommand {
         ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
         double amount = DoubleArgumentType.getDouble(context, (String)"amount");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
+        if (!Double.isFinite(amount)) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Invalid amount: " + amount + ". Must be a finite number.", ChatFormatting.RED));
+            return 0;
+        }
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
-        engine.getInterventionManager().removeBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount).thenAccept(newBalance -> source.getServer().execute(() -> {
-            if (newBalance >= 0.0) {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Removed " + amount + " from " + player.getName().getString() + ". New balance: " + String.format("%.2f", newBalance), ChatFormatting.GREEN));
-            } else {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to remove balance. Insufficient funds or account frozen.", ChatFormatting.RED));
-            }
-        }));
+        engine.getInterventionManager().removeBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount)
+            .thenAccept(newBalance -> source.getServer().execute(() -> {
+                if (newBalance >= 0.0) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Removed " + amount + " from " + player.getName().getString() + ". New balance: " + String.format("%.2f", newBalance), ChatFormatting.GREEN));
+                } else {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to remove balance. Insufficient funds or account frozen.", ChatFormatting.RED));
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Intervention FAILED after the money may have moved - DO NOT blindly retry. Verify the current balance first: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -494,14 +548,29 @@ public class GovernanceCommand {
         ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
         double amount = DoubleArgumentType.getDouble(context, (String)"amount");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
+        if (!Double.isFinite(amount)) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Invalid amount: " + amount + ". Must be a finite number.", ChatFormatting.RED));
+            return 0;
+        }
+        // B-3 companion: setBalance now refuses frozen accounts; give the admin
+        // the actual reason instead of a bare failure.
+        if (engine.getAccountFreezer().isFrozen(player.getUUID())) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + player.getName().getString() + "'s account is FROZEN - unfreeze it before setting the balance.", ChatFormatting.RED));
+            return 0;
+        }
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
-        engine.getInterventionManager().setBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount).thenAccept(success -> source.getServer().execute(() -> {
-            if (success.booleanValue()) {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Set " + player.getName().getString() + "'s balance to " + String.format("%.2f", amount), ChatFormatting.GREEN));
-            } else {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to set balance.", ChatFormatting.RED));
-            }
-        }));
+        engine.getInterventionManager().setBalance(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), amount)
+            .thenAccept(success -> source.getServer().execute(() -> {
+                if (success.booleanValue()) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Set " + player.getName().getString() + "'s balance to " + String.format("%.2f", amount), ChatFormatting.GREEN));
+                } else {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to set balance. Insufficient funds or account frozen.", ChatFormatting.RED));
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Intervention FAILED after the money may have moved - DO NOT blindly retry. Verify the current balance first: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -694,34 +763,50 @@ public class GovernanceCommand {
      * /governance audit export csv [days] - writes the audit trail for the
      * given window (default 7, max 365) to
      * <config dir>/solidus-governance/exports/audit_export_<stamp>.csv.
-     * Synchronous by design like the other audit readers; the write itself
-     * is a single bounded file capped at AuditDatabase.MAX_EXPORT_ROWS.
+     *
+     * <p>C-4 fix (audit round 3): the materialize+serialize+write used to run
+     * SYNCHRONOUSLY on the server thread (blocking ticks for up to 200k rows)
+     * with no cooldown, repeatable by any OP - a main-thread denial of service.
+     * The work now runs off-thread with a 30-second cooldown.</p>
      */
     private static int executeAuditExport(CommandContext<CommandSourceStack> context, GovernanceEngine engine, int days) {
         CommandSourceStack source = (CommandSourceStack)context.getSource();
-        long sinceMs = System.currentTimeMillis() - (long)days * 24L * 60L * 60L * 1000L;
-        List<AuditDatabase.AuditEntry> entries = engine.getAuditDatabase().getAuditLogsSince(sinceMs);
-        if (entries.isEmpty()) {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No audit entries in the last " + days + " day(s) - nothing to export.", ChatFormatting.GRAY));
-            return 1;
+        long now = System.currentTimeMillis();
+        if (now - lastAuditExportMs < EXPENSIVE_COMMAND_COOLDOWN_MS) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Export cooldown active - wait a moment before exporting again.", ChatFormatting.RED));
+            return 0;
         }
-        try {
-            String stamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneOffset.UTC).format(Instant.now());
-            Path dir = engine.getAuditDatabase().getExportsDir();
-            Path file = dir.resolve("audit_export_" + stamp + ".csv");
-            int n = 2;
-            while (Files.exists(file) && n < 100) {
-                file = dir.resolve("audit_export_" + stamp + "_" + n + ".csv");
-                ++n;
+        lastAuditExportMs = now;
+        long sinceMs = now - (long)days * 24L * 60L * 60L * 1000L;
+        java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try {
+                List<AuditDatabase.AuditEntry> entries = engine.getAuditDatabase().getAuditLogsSince(sinceMs);
+                if (entries.isEmpty()) {
+                    return "  No audit entries in the last " + days + " day(s) - nothing to export.";
+                }
+                String stamp = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").withZone(ZoneOffset.UTC).format(Instant.now());
+                Path dir = engine.getAuditDatabase().getExportsDir();
+                Path file = dir.resolve("audit_export_" + stamp + ".csv");
+                int n = 2;
+                while (Files.exists(file) && n < 100) {
+                    file = dir.resolve("audit_export_" + stamp + "_" + n + ".csv");
+                    ++n;
+                }
+                AuditCsvExporter.writeCsvFile(entries, file);
+                long sizeKb = Math.max(1L, Files.size(file) / 1024L);
+                return "  Exported " + entries.size() + " audit entries from the last " + days + " day(s) to solidus-governance/exports/" + file.getFileName().toString() + " (" + sizeKb + " KB)";
             }
-            AuditCsvExporter.writeCsvFile(entries, file);
-            long sizeKb = Math.max(1L, Files.size(file) / 1024L);
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Exported " + entries.size() + " audit entries from the last " + days + " day(s) to ", ChatFormatting.GREEN).append((Component)GovernanceCommand.styled("solidus-governance/exports/" + file.getFileName().toString(), ChatFormatting.AQUA)).append((Component)GovernanceCommand.styled(" (" + sizeKb + " KB)", ChatFormatting.GRAY)));
-        }
-        catch (IOException e) {
-            SolidusGovernanceMod.LOGGER.error("Audit CSV export failed", (Throwable)e);
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Export failed - check the server log for details.", ChatFormatting.RED));
-        }
+            catch (IOException e) {
+                SolidusGovernanceMod.LOGGER.error("Audit CSV export failed", (Throwable)e);
+                return "  Export failed - check the server log for details.";
+            }
+            catch (Exception e) {
+                SolidusGovernanceMod.LOGGER.error("Audit CSV export failed", (Throwable)e);
+                return "  Export failed - check the server log for details.";
+            }
+        }).thenAccept(result -> source.getServer().execute(() ->
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result,
+                result.startsWith("  Exported") ? ChatFormatting.GREEN : ChatFormatting.GRAY))));
         return 1;
     }
 
@@ -856,7 +941,12 @@ public class GovernanceCommand {
         CommandSourceStack source = (CommandSourceStack)context.getSource();
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rolling back audit #" + auditId + "...", ChatFormatting.YELLOW));
-        engine.getRollbackEngine().rollbackById(adminUuid, source.getTextName(), auditId).thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))));
+        engine.getRollbackEngine().rollbackById(adminUuid, source.getTextName(), auditId)
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rollback failed: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -875,7 +965,11 @@ public class GovernanceCommand {
         long fromTimestamp = System.currentTimeMillis() - fromDays * 86_400_000L;
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rolling back " + player.getName().getString() + " to the state before the last " + fromDays + " day(s)...", ChatFormatting.YELLOW));
         engine.getRollbackEngine().rollbackPlayer(adminUuid, source.getTextName(), player.getUUID(), player.getName().getString(), fromTimestamp)
-            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))));
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rollback failed: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -904,7 +998,11 @@ public class GovernanceCommand {
         UUID adminUuid = GovernanceCommand.resolveAdminUuid(source);
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rolling back the window between " + fromDays + " and " + toDays + " day(s) ago...", ChatFormatting.YELLOW));
         engine.getRollbackEngine().rollbackTimeframe(adminUuid, source.getTextName(), fromTimestamp, toTimestamp)
-            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))));
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.WHITE))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rollback failed: " + ex.getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -1041,9 +1139,26 @@ public class GovernanceCommand {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Valid types: transfer-daily, transfer-min, transfer-max, auction-daily", ChatFormatting.GRAY));
             return 0;
         }
+        // B-5 fix (audit round 3): auction-daily is read with getInt, but the
+        // command stored the DOUBLE form ("10.0"). Integer.parseInt("10.0")
+        // throws inside GovernanceConfig.getInt, which returns the -1 default -
+        // so EVERY value set through this command silently DISABLED the daily
+        // auction limit while the admin read "Set auction-daily to 10.00".
+        // Integer-typed limits now store a whole number (fractions rejected),
+        // and the reader tolerates legacy "10.0" values.
+        String storedValue;
+        if ("limits.auction.daily-max".equals(configKey)) {
+            if (value != Math.floor(value)) {
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  auction-daily must be a whole number of listings (got " + value + ").", ChatFormatting.RED));
+                return 0;
+            }
+            storedValue = String.valueOf((long) value);
+        } else {
+            storedValue = String.valueOf(value);
+        }
         String beforeValue = engine.getConfig().getString(configKey, "-1");
-        engine.getConfig().set(configKey, String.valueOf(value));
-        engine.getAuditLogger().logLimitConfigChange(adminUuid, source.getTextName(), type, beforeValue, String.valueOf(value));
+        engine.getConfig().set(configKey, storedValue);
+        engine.getAuditLogger().logLimitConfigChange(adminUuid, source.getTextName(), type, beforeValue, storedValue);
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Set " + type + " to " + (value < 0.0 ? "UNLIMITED" : String.format("%.2f", value)), ChatFormatting.GREEN));
         return 1;
     }
@@ -1230,7 +1345,7 @@ public class GovernanceCommand {
                     case "BONUS_CURRENCY" -> ChatFormatting.LIGHT_PURPLE;
                     default -> ChatFormatting.WHITE;
                 };
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + event.getId().substring(0, 8) + "... ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + event.getType() + "] ", typeColor)).append((Component)GovernanceCommand.styled(event.getName() + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled("x" + event.getModifier() + " ", ChatFormatting.GRAY)).append((Component)GovernanceCommand.styled(event.getRemainingDurationString(), ChatFormatting.YELLOW)));
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + event.getId().substring(0, Math.min(8, event.getId().length())) + "... ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + event.getType() + "] ", typeColor)).append((Component)GovernanceCommand.styled(event.getName() + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled("x" + event.getModifier() + " ", ChatFormatting.GRAY)).append((Component)GovernanceCommand.styled(event.getRemainingDurationString(), ChatFormatting.YELLOW)));
             }
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
         }
@@ -1394,7 +1509,7 @@ public class GovernanceCommand {
                 case "BONUS_CURRENCY" -> ChatFormatting.LIGHT_PURPLE;
                 default -> ChatFormatting.WHITE;
             };
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + event.getId().substring(0, 8) + "... ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + event.getType() + "] ", typeColor)).append((Component)GovernanceCommand.styled(event.getName() + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled(event.isActive() ? "ACTIVE" : "EXPIRED", event.isActive() ? ChatFormatting.GREEN : ChatFormatting.RED)).append((Component)GovernanceCommand.styled(" " + time, ChatFormatting.DARK_GRAY)));
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + event.getId().substring(0, Math.min(8, event.getId().length())) + "... ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + event.getType() + "] ", typeColor)).append((Component)GovernanceCommand.styled(event.getName() + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled(event.isActive() ? "ACTIVE" : "EXPIRED", event.isActive() ? ChatFormatting.GREEN : ChatFormatting.RED)).append((Component)GovernanceCommand.styled(" " + time, ChatFormatting.DARK_GRAY)));
         }
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
         return 1;
@@ -1407,12 +1522,23 @@ public class GovernanceCommand {
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Player profiles are not available.", ChatFormatting.RED));
             return 0;
         }
+        // C-3 fix (audit round 3): profile generation materializes a large
+        // leaderboard scan plus several DB queries; any OP could spam it every
+        // tick (memory/CPU DoS). 30-second cooldown, mirroring the export guard.
+        long now = System.currentTimeMillis();
+        if (now - lastProfileCommandMs < EXPENSIVE_COMMAND_COOLDOWN_MS) {
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Profile cooldown active - wait a moment before requesting another profile.", ChatFormatting.RED));
+            return 0;
+        }
+        lastProfileCommandMs = now;
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Loading profile for " + player.getName().getString() + "...", ChatFormatting.YELLOW));
         ((CompletableFuture)engine.getProfileGenerator().generateProfile(player.getUUID(), player.getName().getString()).thenAccept(profile -> source.getServer().execute(() -> {
             boolean isPremium = engine.isPremiumEnabled();
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550 Economy Profile: " + player.getName().getString() + " \u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Balance: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(String.format("%,.2f", profile.getBalance()), ChatFormatting.WHITE)));
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rank: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled("#" + profile.getRank() + " of " + profile.getTotalPlayers(), ChatFormatting.WHITE)));
+            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rank: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(
+                profile.getRank() < 0 ? "beyond top " + ProfileGenerator.RANK_SCAN_LIMIT
+                    : "#" + profile.getRank() + " of " + profile.getTotalPlayers(), ChatFormatting.WHITE)));
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Account Status: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(profile.isFrozen() ? "FROZEN" : "ACTIVE", profile.isFrozen() ? ChatFormatting.RED : ChatFormatting.GREEN)));
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Suspicious: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(profile.isSuspicious() ? "YES" : "NO", profile.isSuspicious() ? ChatFormatting.RED : ChatFormatting.GREEN)));
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Frozen: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(profile.isFrozen() ? "YES" : "NO", profile.isFrozen() ? ChatFormatting.RED : ChatFormatting.GREEN)));

@@ -71,13 +71,20 @@ public class GovernanceEngine {
             String today;
             this.accountFreezer.checkExpirations();
             if (this.licenseVerifier.isPremiumEnabled()) {
+                // B-12 fix (audit round 3): the automator (anti-inflation + wealth
+                // caps) used to run ONLY when the rule engine was empty - enabling a
+                // single rule silently switched off both automations. They are
+                // independent features and now both run.
                 if (this.ruleEngine != null && this.config.getBool("rules.enabled", true) && this.ruleEngine.getEnabledRuleCount() > 0) {
                     this.ruleEngine.evaluateAll();
-                } else {
-                    this.automator.onPeriodicCheck();
                 }
+                this.automator.onPeriodicCheck();
             }
-            if (this.eventManager != null && this.isPremiumEnabled()) {
+            if (this.eventManager != null) {
+                // B-8/C-1 companion: expiration-revert is CLEANUP, not a premium
+                // feature - an event whose license lapsed mid-session must still
+                // revert its config values on time. Creation stays premium-gated
+                // inside EventManager.createEvent.
                 this.eventManager.tickExpirations();
             }
             if (!(today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)).equals(this.lastKnownDate)) {

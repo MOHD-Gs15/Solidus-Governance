@@ -119,6 +119,7 @@ class CommandTreeShapeTest {
         expected.add("governance intervention unfreeze player");
         expected.add("governance intervention unlock");
         expected.add("governance license");
+        expected.add("governance license reverify");
         expected.add("governance limits");
         expected.add("governance limits reset *");
         expected.add("governance limits reset player");
@@ -242,5 +243,99 @@ class CommandTreeShapeTest {
             "/gov alias missing");
         assertTrue(actualPaths.stream().anyMatch(p -> p.equals("governance")),
             "/governance root missing");
+    }
+
+    /**
+     * C-6 regression test (audit round 3): the tree shape above asserts node
+     * NAMES only - the permission GATES were completely untested, which is the
+     * exact regression class solidus-core round 1 caught (exportall OP-level
+     * 0 -> 2). Gates are now verified SEMANTICALLY: a mocked GAMEMASTERS-level
+     * (OP-2) source must be rejected by every money-mutating family, while an
+     * ADMINS-level (OP-3) source must be accepted.
+     */
+    @Test
+    void mutatingCommandFamiliesRejectGameMasterLevelSources() {
+        for (String path : MUTATING_FAMILY_PATHS) {
+            CommandNode<CommandSourceStack> node = find(path);
+            assertNotNull(node, "path not registered: " + path);
+            assertTrue(node.getRequirement().test(sourceAtLevel(3)),
+                "ADMINS-level gate must ACCEPT an OP-3 source: " + path);
+            assertFalse(node.getRequirement().test(sourceAtLevel(1)),
+                "gate must REJECT an OP-1 source: " + path);
+            assertFalse(node.getRequirement().test(sourceAtLevel(2)),
+                "money-mutating family must REJECT a GAMEMASTERS (OP-2) source - "
+                    + "it must be gated at ADMINS (OP-3): " + path);
+        }
+    }
+
+    @Test
+    void readLevelCommandsAcceptGameMasterSources() {
+        for (String path : new String[]{"governance", "governance profile", "governance event"}) {
+            CommandNode<CommandSourceStack> node = find(path);
+            assertNotNull(node, "path not registered: " + path);
+            assertTrue(node.getRequirement().test(sourceAtLevel(2)),
+                "read-level command must ACCEPT a GAMEMASTERS (OP-2) source: " + path);
+            assertFalse(node.getRequirement().test(sourceAtLevel(1)),
+                "root must reject sub-OP sources: " + path);
+        }
+    }
+
+    /** Families that mutate money, config, recovery or secrets - ADMINS only. */
+    private static final String[] MUTATING_FAMILY_PATHS = {
+        "governance intervention", "governance tax", "governance recovery",
+        "governance automation", "governance limits set", "governance limits reset",
+        "governance discord set", "governance discord remove", "governance discord test",
+        "governance event create", "governance event cancel",
+        "governance audit export", "governance license", "governance license reverify",
+        "governance policy save", "governance policy load", "governance policy delete",
+        "governance fingerprint",
+    };
+
+    /**
+     * Builds a REAL CommandSourceStack whose PermissionSet answers checks
+     * exactly like an operator at the given command level: a gate asking for
+     * a level at or below ours passes, anything stricter fails. Only the
+     * permission facet matters for requirement predicates, so the other
+     * constructor slots are null/zero.
+     */
+    private static CommandSourceStack sourceAtLevel(int level) {
+        net.minecraft.server.permissions.PermissionSet permissionSet =
+            asked -> asked instanceof net.minecraft.server.permissions.Permission.HasCommandLevel hcl
+                && hcl.level().id() <= level;
+        return new CommandSourceStack(
+            null,                                        // CommandSource
+            net.minecraft.world.phys.Vec3.ZERO,
+            net.minecraft.world.phys.Vec2.ZERO,
+            null,                                        // ServerLevel
+            permissionSet,
+            "test-source",
+            null,                                        // display name
+            null,                                        // MinecraftServer
+            null);                                       // entity
+    }
+
+    private static java.util.Map<String, CommandNode<CommandSourceStack>> nodeIndex;
+
+    @BeforeAll
+    static void indexNodes() {
+        // buildTree() already registered a dispatcher for shape collection; the
+        // index needs the same tree, so register a fresh one (register is pure).
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+        CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();
+        GovernanceCommand.register(dispatcher, null);
+        nodeIndex = new java.util.HashMap<>();
+        index(dispatcher.getRoot().getChild("governance"), "governance");
+    }
+
+    private static void index(CommandNode<CommandSourceStack> node, String path) {
+        nodeIndex.put(path, node);
+        for (CommandNode<CommandSourceStack> child : node.getChildren()) {
+            index(child, path + " " + child.getName());
+        }
+    }
+
+    private static CommandNode<CommandSourceStack> find(String path) {
+        return nodeIndex.get(path);
     }
 }

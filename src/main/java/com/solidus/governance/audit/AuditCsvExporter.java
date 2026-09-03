@@ -75,7 +75,13 @@ public final class AuditCsvExporter {
     /**
      * RFC 4180 field escaping: quotes a field when it contains a comma,
      * quote, CR, or LF, and doubles any inner quotes. Null becomes empty.
-     * Package-private so the escaping contract is directly unit-testable.
+     *
+     * <p>A-5 fix (audit round 3, mirrors Core 2.1.3): a field that BEGINS with
+     * a spreadsheet formula character ({@code = + - @}) or a control char would
+     * execute as a formula when an admin opens the export in Excel/LibreOffice
+     * - rule names, policy values, config strings and offline-mode player names
+     * are all attacker-influenced. Formula-prefixed fields are neutralized with
+     * a leading apostrophe (the spreadsheet treats the cell as text).</p>
      */
     static String csvEscape(String field) {
         if (field == null) return "";
@@ -83,7 +89,15 @@ public final class AuditCsvExporter {
             || field.indexOf('"') >= 0
             || field.indexOf('\n') >= 0
             || field.indexOf('\r') >= 0;
-        if (!needsQuoting) return field;
-        return '"' + field.replace("\"", "\"\"") + '"';
+        boolean formulaPrefix = !field.isEmpty() && isFormulaPrefix(field.charAt(0));
+        if (!needsQuoting && !formulaPrefix) return field;
+        String escaped = formulaPrefix ? "'" + field : field;
+        if (!needsQuoting) return escaped;
+        return '"' + escaped.replace("\"", "\"\"") + '"';
+    }
+
+    /** Characters that start a spreadsheet formula when placed at cell start. */
+    private static boolean isFormulaPrefix(char c) {
+        return c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r';
     }
 }
