@@ -141,6 +141,45 @@ class AuditCsvExporterTest {
     }
 
     @Test
+    @DisplayName("A-5: formula-prefixed fields (= + - @) are neutralized, not passed through")
+    void formulaInjectionNeutralized() {
+        // Every spreadsheet formula trigger character at cell start must be
+        // neutralized with a leading apostrophe (Core 2.1.3 parity).
+        assertEquals("'=cmd|' /C calc'!A0'", AuditCsvExporter.csvEscape("=cmd|' /C calc'!A0'"));
+        assertEquals("'+SUM(A1:A9)", AuditCsvExporter.csvEscape("+SUM(A1:A9)"));
+        assertEquals("'-2+1|cmd", AuditCsvExporter.csvEscape("-2+1|cmd"));
+        assertEquals("'@import('x')", AuditCsvExporter.csvEscape("@import('x')"));
+        // Formula char NOT at the start is untouched.
+        assertEquals("5+5", AuditCsvExporter.csvEscape("5+5"));
+        assertEquals("a=b", AuditCsvExporter.csvEscape("a=b"));
+    }
+
+    @Test
+    @DisplayName("A-5: tab/CR formula prefixes are neutralized too")
+    void controlCharFormulaPrefixesNeutralized() {
+        assertEquals("'\t=1+1", AuditCsvExporter.csvEscape("\t=1+1"));
+        // A field starting with CR is BOTH quoted (contains CR) and prefixed.
+        assertEquals("\"'\r=1+1\"", AuditCsvExporter.csvEscape("\r=1+1"));
+    }
+
+    @Test
+    @DisplayName("A-5: formula prefix + quoting compose (comma AND leading '=')")
+    void formulaPrefixAndQuotingCompose() {
+        assertEquals("\"'=HYPERLINK(\"\"http://evil\"\")\"", AuditCsvExporter.csvEscape("=HYPERLINK(\"http://evil\")"));
+    }
+
+    @Test
+    @DisplayName("A-5: full-row build neutralizes an attacker-influenced details field")
+    void csvRowNeutralizesFormulaInDetails() {
+        AuditDatabase.AuditEntry entry = new AuditDatabase.AuditEntry(
+            1, 1L, "admin", "Admin", "rule_trigger", "AUTOMATION",
+            null, "=cmd|' /C calc'!A0'", null, null, null, 0);
+        String csv = AuditCsvExporter.buildCsv(List.of(entry));
+        assertTrue(csv.contains("'=cmd|"),
+            "a formula-prefixed target_name must be neutralized, got: " + csv);
+    }
+
+    @Test
     @DisplayName("writeCsvFile writes UTF-8 content matching buildCsv under exports dir")
     void writeCsvFileRoundTrip() throws Exception {
         AuditDatabase.AuditEntry entry = new AuditDatabase.AuditEntry(

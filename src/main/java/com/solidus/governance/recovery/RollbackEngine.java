@@ -28,6 +28,10 @@ public class RollbackEngine {
         "A rollback operation is already in progress - wait for it to finish "
             + "(use /governance dryrun to preview safely in the meantime).";
 
+    /** A-3: bounded search windows, disclosed in user-facing messages. */
+    static final int ROLLBACK_PLAYER_WINDOW = 100;
+    static final int ROLLBACK_TIMEFRAME_WINDOW = 10_000;
+
     public RollbackEngine(GovernanceEngine engine) {
         this.engine = engine;
     }
@@ -54,6 +58,14 @@ public class RollbackEngine {
         }
         if ("RECOVERY".equals(entry.category)) {
             return CompletableFuture.completedFuture("Cannot roll back a recovery operation (prevents rollback loops).");
+        }
+        // A-8 fix (audit round 3): CONFIG/LIMITS audit rows carry before/after
+        // values but NO target UUID; UUID.fromString(null) here was an uncaught
+        // NPE that killed the command with a stack trace. Fail with a clear
+        // message instead.
+        if (entry.targetUuid == null) {
+            return CompletableFuture.completedFuture("Audit entry #" + auditId
+                + " has no target player (" + entry.category + " entry) - only balance mutations can be rolled back.");
         }
         try {
             double before = Double.parseDouble(entry.beforeValue);
@@ -86,10 +98,16 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> rollbackPlayer(UUID adminUuid, String adminName, UUID targetUuid, String targetName, long fromTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, 100);
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW);
         AuditDatabase.AuditEntry restoreEntry = RollbackEngine.selectRestoreEntry(entries, fromTimestamp, null);
         if (restoreEntry == null) {
-            return CompletableFuture.completedFuture("No actions to roll back for player " + targetName);
+            // A-3 fix (audit round 3): the bounded window (newest 100 rows for
+            // this target) used to report "no actions" without disclosing the
+            // bound - a window older than the newest slice looked like "nothing
+            // happened". The message now states exactly what was searched.
+            return CompletableFuture.completedFuture("No actions to roll back for " + targetName
+                + " within the newest " + ROLLBACK_PLAYER_WINDOW + " audit rows for this player."
+                + " If the incident is older, narrow the timeframe or export the audit log to locate it.");
         }
         double before;
         try {
@@ -107,7 +125,9 @@ public class RollbackEngine {
                 if (this.engine != null && srv != null) {
                     srv.execute(() -> this.engine.getAuditLogger().logRollback(adminUuid, adminName, targetUuid, targetName, "PLAYER", restoreEntry.id));
                 }
-                return "Rolled back 1 action for player " + targetName + ": balance restored to " + before + " (state before audit #" + restoreEntry.id + ", the earliest affected action in the window).";
+                return "Rolled back 1 action for player " + targetName + ": balance restored to " + before
+                + " (state before audit #" + restoreEntry.id
+                + ", the earliest affected action in the newest " + ROLLBACK_PLAYER_WINDOW + " rows for this player).";
             }
             return "Failed to roll back player " + targetName + ": setBalance returned false.";
         }).exceptionally(ex -> "Failed to roll back player " + targetName + ": " + ((Throwable)ex).getMessage())
@@ -139,11 +159,15 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> rollbackTimeframe(UUID adminUuid, String adminName, long fromTimestamp, long toTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(10000);
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW);
         LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
             RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
         if (restorePerPlayer.isEmpty()) {
-            return CompletableFuture.completedFuture("No actions to roll back in the specified timeframe.");
+            // A-3 fix: disclose the bounded search window instead of implying
+            // nothing happened anywhere.
+            return CompletableFuture.completedFuture("No actions to roll back in the specified timeframe"
+                + " (searched the newest " + ROLLBACK_TIMEFRAME_WINDOW + " audit rows)."
+                + " If the incident is older than that window, narrow the timeframe or export the audit log.");
         }
         if (!tryBeginRollback()) {
             return CompletableFuture.completedFuture(BUSY_MESSAGE);
@@ -177,7 +201,8 @@ public class RollbackEngine {
                 if (!Boolean.TRUE.equals(future.join())) continue;
                 rolledBack[0] = rolledBack[0] + 1;
             }
-            return "Rolled back " + rolledBack[0] + " unique players in timeframe (balance restored to the state before their earliest affected action).";
+            return "Rolled back " + rolledBack[0] + " unique players in timeframe (balance restored to the state before their earliest affected action;"
+                + " searched the newest " + ROLLBACK_TIMEFRAME_WINDOW + " audit rows).";
         }).whenComplete((ignored, throwable) -> endRollback());
     }
 
@@ -250,7 +275,7 @@ public class RollbackEngine {
      * it does not take the rollback lock.
      */
     public CompletableFuture<String> dryRunRollbackPlayer(UUID targetUuid, String targetName, long fromTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, 100);
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW);
         AuditDatabase.AuditEntry restoreEntry = RollbackEngine.selectRestoreEntry(entries, fromTimestamp, null);
         if (restoreEntry == null) {
             return CompletableFuture.completedFuture(
@@ -289,7 +314,7 @@ public class RollbackEngine {
      * touching any balance. Read-only, so it does not take the rollback lock.
      */
     public CompletableFuture<String> dryRunRollbackTimeframe(long fromTimestamp, long toTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(10000);
+        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW);
         LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
             RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
         if (restorePerPlayer.isEmpty()) {

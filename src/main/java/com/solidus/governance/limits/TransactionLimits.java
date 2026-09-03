@@ -87,7 +87,7 @@ public class TransactionLimits {
         if (!this.engine.isPremiumEnabled()) {
             return true;
         }
-        int dailyMax = this.config.getInt("limits.auction.daily-max", -1);
+        int dailyMax = TransactionLimits.readAuctionDailyMax(this.config);
         if (dailyMax < 0) {
             return true;
         }
@@ -133,6 +133,33 @@ public class TransactionLimits {
         SolidusGovernanceMod.LOGGER.debug("Auction listing for {} confirmed (already reserved at veto time). Daily count: {}", (Object)player, (Object)usage.auctionCount);
     }
 
+    /**
+     * B-5 fix (audit round 3): the limit-set command historically stored the
+     * auction daily max as a DOUBLE ("10.0"), and getInt's Integer.parseInt
+     * then threw inside GovernanceConfig, silently returning the -1 default -
+     * disabling the limit while the admin believed it was set. New writes are
+     * whole numbers; this reader additionally tolerates legacy "10.0" values
+     * from older configs by rounding the double form.
+     */
+    static int readAuctionDailyMax(GovernanceConfig config) {
+        String raw = config.getString("limits.auction.daily-max", "-1");
+        if (raw != null && !raw.isBlank()) {
+            try {
+                return Integer.parseInt(raw.trim());
+            } catch (NumberFormatException notInt) {
+                try {
+                    double asDouble = Double.parseDouble(raw.trim());
+                    if (Double.isFinite(asDouble)) {
+                        return (int) Math.floor(asDouble);
+                    }
+                } catch (NumberFormatException notDouble) {
+                    // fall through to the default below
+                }
+            }
+        }
+        return -1;
+    }
+
     public void resetDailyLimits() {
         SolidusGovernanceMod.LOGGER.info("Resetting daily transaction limits...");
         this.dailyUsageMap.clear();
@@ -158,7 +185,7 @@ public class TransactionLimits {
         if (!this.engine.isPremiumEnabled()) {
             return Integer.MAX_VALUE;
         }
-        int dailyMax = this.config.getInt("limits.auction.daily-max", -1);
+        int dailyMax = TransactionLimits.readAuctionDailyMax(this.config);
         if (dailyMax < 0) {
             return Integer.MAX_VALUE;
         }

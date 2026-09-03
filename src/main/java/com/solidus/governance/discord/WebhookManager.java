@@ -10,6 +10,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BooleanSupplier;
 
 public class WebhookManager {
     public static final int COLOR_LOCKDOWN = 0xFF0000;
@@ -24,12 +25,28 @@ public class WebhookManager {
     private final GovernanceConfig config;
     private final DiscordWebhook webhook;
     private final WebhookRateLimiter rateLimiter;
+    /** D-2 fix (audit round 3): the premium gate used to exist only in the
+     *  command UI while every event-driven call site (tax collection, large
+     *  interventions, snapshots, rollbacks, backups, automation) sent alerts
+     *  unchecked - a free server with discord.enabled=true got the full
+     *  alerting feature. The SEND path itself is now gated. */
+    private volatile BooleanSupplier premiumGate = null;
 
     public WebhookManager(GovernanceConfig config) {
         this.config = config;
         this.rateLimiter = new WebhookRateLimiter();
         this.webhook = new DiscordWebhook(this.rateLimiter);
         SolidusGovernanceMod.LOGGER.info("WebhookManager initialized.");
+    }
+
+    /** Installs the premium gate consulted by every send path. */
+    public void setPremiumGate(BooleanSupplier gate) {
+        this.premiumGate = gate;
+    }
+
+    private boolean isPremiumAllowed() {
+        BooleanSupplier gate = this.premiumGate;
+        return gate == null || gate.getAsBoolean();
     }
 
     public String getWebhookUrl(String category) {
@@ -59,6 +76,12 @@ public class WebhookManager {
         if (!this.isDiscordEnabled()) {
             return CompletableFuture.completedFuture(null);
         }
+        if (!this.isPremiumAllowed()) {
+            // D-2: enforcement belongs in the send path, not only in the command UI.
+            SolidusGovernanceMod.LOGGER.debug(
+                "WebhookManager: '{}' alert suppressed (premium license required for Discord delivery)", category);
+            return CompletableFuture.completedFuture(null);
+        }
         String webhookUrl = this.getWebhookUrl(category);
         int color = WebhookManager.getColorForCategory(category);
         return ((CompletableFuture)this.webhook.sendAlert(category, title, description, color, webhookUrl).thenAccept(success -> {
@@ -73,6 +96,9 @@ public class WebhookManager {
 
     public CompletableFuture<Void> sendDailySummary(GovernanceEngine engine) {
         if (!this.isDiscordEnabled()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!this.isPremiumAllowed()) {
             return CompletableFuture.completedFuture(null);
         }
         String date = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE);

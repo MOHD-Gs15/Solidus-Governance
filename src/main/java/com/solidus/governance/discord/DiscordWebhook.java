@@ -6,6 +6,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.CompletableFuture;
@@ -13,7 +14,15 @@ import java.util.concurrent.CompletableFuture;
 public class DiscordWebhook {
     private static final int MAX_RETRIES = 3;
     private static final long BACKOFF_BASE_MS = 1000L;
-    private final HttpClient httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_2).build();
+    /** D-8 fix (audit round 3): without a connect/request timeout, one hung
+     *  webhook endpoint blocked the rate limiter's only drain thread forever
+     *  (all queued alerts silently rotted behind it). */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    private final HttpClient httpClient = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_2)
+        .connectTimeout(CONNECT_TIMEOUT)
+        .build();
     private final WebhookRateLimiter rateLimiter;
 
     public DiscordWebhook(WebhookRateLimiter rateLimiter) {
@@ -79,7 +88,12 @@ public class DiscordWebhook {
     }
 
     private CompletableFuture<Boolean> sendHttpRequest(String webhookUrl, String payload) {
-        HttpRequest request = HttpRequest.newBuilder().uri(URI.create(webhookUrl)).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(payload)).build();
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(webhookUrl))
+            .timeout(REQUEST_TIMEOUT)
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(payload))
+            .build();
         return ((CompletableFuture)this.httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString()).thenApply(response -> {
             if (response.statusCode() == 204 || response.statusCode() == 200) {
                 SolidusGovernanceMod.LOGGER.debug("DiscordWebhook: message sent successfully (HTTP {})", (Object)response.statusCode());
@@ -102,7 +116,31 @@ public class DiscordWebhook {
         if (value == null) {
             return "\"\"";
         }
-        String escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
-        return "\"" + escaped + "\"";
+        StringBuilder sb = new StringBuilder(value.length() + 8);
+        sb.append('"');
+        for (int i = 0; i < value.length(); ++i) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"' -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                default -> {
+                    // D-12 fix: control chars below 0x20 (raw 0x01, 0x1F, ... from
+                    // crafted offline-mode usernames) break the JSON payload and
+                    // kill the alert. Every one of them becomes a unicode escape sequence.
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        sb.append('"');
+        return sb.toString();
     }
 }

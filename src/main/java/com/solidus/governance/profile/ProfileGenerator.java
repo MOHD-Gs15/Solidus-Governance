@@ -11,6 +11,15 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 public class ProfileGenerator {
+    /**
+     * C-3 fix (audit round 3): the rank scan used to pull the FULL leaderboard
+     * (getTopBalances(100000)) on every /governance profile invocation - the
+     * exact R28 anti-pattern fixed everywhere else. The scan is bounded to the
+     * top 5000; players below that report "beyond top 5000", and the total
+     * player count prefers Core's single-query economy stats.
+     */
+    public static final int RANK_SCAN_LIMIT = 5000;
+
     private final GovernanceEngine engine;
 
     public ProfileGenerator(GovernanceEngine engine) {
@@ -50,20 +59,28 @@ public class ProfileGenerator {
     }
 
     private CompletableFuture<Void> getRank(UUID playerUuid, String playerName, PlayerProfile profile) {
-        return ((CompletableFuture)SolidusIntegration.getTopBalances(100000).thenAccept(balances -> {
-            profile.setTotalPlayers(balances.size());
-            for (SolidusIntegration.BalanceEntry entry : balances) {
-                if (!entry.playerName().equalsIgnoreCase(playerName)) continue;
-                profile.setRank(entry.rank());
-                return;
-            }
-            profile.setRank(balances.size() + 1);
-        })).exceptionally(ex -> {
-            SolidusGovernanceMod.LOGGER.warn("Failed to get rank for {}: {}", (Object)playerName, (Object)((Throwable)ex).getMessage());
-            profile.setRank(0);
-            profile.setTotalPlayers(0);
-            return null;
-        });
+        // Total player count first: single aggregate query when Core >= 2.1.x.
+        return ((CompletableFuture)SolidusIntegration.getEconomyStats()
+            .thenCompose(stats -> {
+                Integer knownTotal = stats != null ? stats.playerCount() : null;
+                return SolidusIntegration.getTopBalances(RANK_SCAN_LIMIT).thenAccept(balances -> {
+                    Integer total = knownTotal != null && knownTotal > 0 ? knownTotal : balances.size();
+                    profile.setTotalPlayers(total);
+                    for (SolidusIntegration.BalanceEntry entry : balances) {
+                        if (!entry.playerName().equalsIgnoreCase(playerName)) continue;
+                        profile.setRank(entry.rank());
+                        return;
+                    }
+                    // Not inside the bounded scan: honest marker instead of a
+                    // misleading "rank 100001".
+                    profile.setRank(-1);
+                });
+            })).exceptionally(ex -> {
+                SolidusGovernanceMod.LOGGER.warn("Failed to get rank for {}: {}", (Object)playerName, (Object)((Throwable)ex).getMessage());
+                profile.setRank(0);
+                profile.setTotalPlayers(0);
+                return null;
+            });
     }
 
     private CompletableFuture<Void> computeWeeklyStats(UUID playerUuid, PlayerProfile profile) {

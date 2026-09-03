@@ -40,13 +40,18 @@ public class TaxLedgerDatabase {
                              String taxType, double amount, int attempts, long createdAt) {}
 
     private final String databaseUrl;
-    private final ExecutorService executor;
+    /** Recreated on re-initialize (live restore calls shutdown() then initialize()). */
+    private volatile ExecutorService executor;
     private volatile Connection connection;
     private volatile boolean initialized = false;
 
     public TaxLedgerDatabase(Path configDir) {
         this.databaseUrl = "jdbc:sqlite:" + configDir.resolve(DB_NAME).toString();
-        this.executor = Executors.newSingleThreadExecutor(r -> {
+        this.executor = newExecutor();
+    }
+
+    private static ExecutorService newExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "Solidus-TaxLedger-DB");
             t.setDaemon(true);
             return t;
@@ -55,6 +60,11 @@ public class TaxLedgerDatabase {
 
     public void initialize() {
         try {
+            // A-1 fix: recreate the executor if a previous shutdown() terminated it.
+            ExecutorService current = this.executor;
+            if (current == null || current.isShutdown()) {
+                this.executor = newExecutor();
+            }
             this.connection = DriverManager.getConnection(this.databaseUrl);
             try (Statement stmt = this.connection.createStatement()) {
                 stmt.execute("PRAGMA journal_mode=WAL");
@@ -177,17 +187,42 @@ public class TaxLedgerDatabase {
 
     /** Marks a pending tax as collected (removes it from the ledger). */
     public void markCollected(long id) {
+        markCollectedNow(id);
+    }
+
+    /**
+     * Synchronous completion mark (B-6 fix, audit round 3). The async
+     * fire-and-forget DELETE left a crash window where the money had already
+     * moved but the debt row survived, so the next sweep collected the SAME
+     * tax twice. The caller invokes this from a completion callback that
+     * already runs OFF the server thread, so a local sub-millisecond DELETE
+     * is safe here. On failure the row is force-dropped via the attempts
+     * budget instead of being left re-collectable: the money is already
+     * collected, so keeping the row would double-charge the player.
+     */
+    public void markCollectedNow(long id) {
         if (!this.initialized) {
             return;
         }
-        this.executor.submit(() -> {
-            try (PreparedStatement ps = this.connection.prepareStatement("DELETE FROM pending_taxes WHERE id = ?")) {
-                ps.setLong(1, id);
+        try (PreparedStatement ps = this.connection.prepareStatement("DELETE FROM pending_taxes WHERE id = ?")) {
+            ps.setLong(1, id);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            SolidusGovernanceMod.LOGGER.error(
+                "Failed to mark pending tax #{} collected - force-dropping the row to prevent a double collection", id, e);
+            // Conservative direction: the money has moved; a surviving row
+            // would be re-collected. Drop it via the attempts budget instead.
+            try (PreparedStatement ps = this.connection.prepareStatement(
+                    "UPDATE pending_taxes SET attempts = ?, last_error = ? WHERE id = ?")) {
+                ps.setInt(1, MAX_ATTEMPTS);
+                ps.setString(2, "markCollected failed: " + e.getMessage());
+                ps.setLong(3, id);
                 ps.executeUpdate();
-            } catch (SQLException e) {
-                SolidusGovernanceMod.LOGGER.error("Failed to mark pending tax #{} collected", id, e);
+            } catch (SQLException e2) {
+                SolidusGovernanceMod.LOGGER.error(
+                    "CRITICAL: could not drop pending tax #{} after a failed completion mark - MANUAL REVIEW needed to avoid a double collection", id, e2);
             }
-        });
+        }
     }
 
     /** Records a failed retry attempt. Drops the entry once attempts are exhausted. */

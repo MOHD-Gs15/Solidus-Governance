@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
@@ -363,7 +364,8 @@ public final class BackupManager {
         if (!Files.isDirectory(backupRoot)) return runs;
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(backupRoot, "backup-*")) {
             for (Path p : ds) {
-                if (Files.isDirectory(p)) runs.add(p);
+                // A-4: do not follow a symlinked run directory into its target.
+                if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) runs.add(p);
             }
         }
         // Names embed yyyyMMdd-HHmmss-SSS: lexicographic order == chronological order.
@@ -504,6 +506,35 @@ public final class BackupManager {
             if (Files.exists(target)) {
                 moveAtomically(target, quarantined);
                 lines.add("Quarantined previous file: " + quarantined.getFileName());
+            }
+            // A-2 fix (audit round 3): SQLite WAL databases keep recent writes in
+            // <db>-wal / <db>-shm sidecar files. Quarantining ONLY the main file
+            // left a stale hot WAL next to the freshly restored copy; on the next
+            // open, SQLite REPLAYED that WAL onto the restored point-in-time file -
+            // silently resurrecting exactly the post-backup transactions the
+            // restore was meant to remove (or corrupting the file). The sidecars
+            // are quarantined together with the main file so the restored copy
+            // starts from a clean, checkpointed state.
+            for (String suffix : new String[]{"-wal", "-shm"}) {
+                Path walSidecar = target.resolveSibling(dbName + suffix);
+                if (Files.exists(walSidecar)) {
+                    Path sidecarQuarantine = quarantine.resolve(dbName + suffix + "." + RUN_TS.format(LocalDateTime.now()));
+                    try {
+                        moveAtomically(walSidecar, sidecarQuarantine);
+                        lines.add("Quarantined stale WAL sidecar: " + sidecarQuarantine.getFileName());
+                    } catch (Exception sidecarEx) {
+                        // A sidecar that cannot be moved must NOT survive next to a
+                        // restored file - deleting it is safe (WAL is transient by
+                        // design) and better than letting it replay onto the restore.
+                        try {
+                            Files.deleteIfExists(walSidecar);
+                            lines.add("Deleted stale WAL sidecar: " + dbName + suffix);
+                        } catch (Exception delEx) {
+                            lines.add("WARNING: could not quarantine or delete stale sidecar " + dbName + suffix
+                                + " (" + delEx.getMessage() + ") - the restored file may replay stale WAL writes.");
+                        }
+                    }
+                }
             }
             Files.copy(backupFile, target, StandardCopyOption.REPLACE_EXISTING);
             if (descriptor.owner() == Owner.GOVERNANCE && controller != null) {
@@ -652,9 +683,18 @@ public final class BackupManager {
 
     private void deleteRecursively(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
+        // A-4 fix (audit round 3): directory tests and the stream below used to
+        // FOLLOW symlinks, so a local attacker could point backups/backup-x at
+        // any directory and the retention sweep would delete the TARGET tree's
+        // contents. NOFOLLOW keeps the walk inside the real backup tree; a
+        // symlinked run directory is deleted as a link, never walked into.
+        if (!Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            Files.deleteIfExists(dir);
+            return;
+        }
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(dir)) {
             for (Path p : ds) {
-                if (Files.isDirectory(p)) deleteRecursively(p);
+                if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) deleteRecursively(p);
                 else Files.deleteIfExists(p);
             }
         }

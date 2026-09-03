@@ -148,8 +148,41 @@ public class GovernanceConfig {
     public synchronized void save() {
         try {
             Files.createDirectories(this.configPath.getParent(), new FileAttribute[0]);
-            try (BufferedWriter writer = Files.newBufferedWriter(this.configPath, new OpenOption[0]);){
+            // D-7 fix (audit round 3): the config holds Discord webhook URLs
+            // (credentials). It used to be written directly (a crash mid-write
+            // truncated it and silently reset the server to defaults) and with
+            // default 0644 permissions (world-readable on shared hosts). The
+            // write is now atomic (temp file + move) and the file is 0600.
+            Path tmp = this.configPath.resolveSibling(this.configPath.getFileName() + ".tmp");
+            try (BufferedWriter writer = Files.newBufferedWriter(tmp, new OpenOption[0]);){
                 this.properties.store(writer, "Solidus Governance Configuration");
+            }
+            try {
+                java.nio.file.attribute.PosixFileAttributeView view =
+                    java.nio.file.Files.getFileAttributeView(tmp,
+                        java.nio.file.attribute.PosixFileAttributeView.class);
+                if (view != null) {
+                    view.setPermissions(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+                }
+            } catch (Exception permsEx) {
+                // Best-effort hardening; the atomic write still completes.
+            }
+            try {
+                Files.move(tmp, this.configPath, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException plainMove) {
+                Files.move(tmp, this.configPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            // Harden an existing config file that predates this fix.
+            try {
+                java.nio.file.attribute.PosixFileAttributeView view =
+                    java.nio.file.Files.getFileAttributeView(this.configPath,
+                        java.nio.file.attribute.PosixFileAttributeView.class);
+                if (view != null) {
+                    view.setPermissions(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+                }
+            } catch (Exception permsEx) {
+                // Best-effort hardening.
             }
         }
         catch (IOException e) {

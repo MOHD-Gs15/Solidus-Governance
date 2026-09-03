@@ -79,7 +79,11 @@ public class WebhookRateLimiter {
             QueuedMessage msg;
             while ((msg = this.queue.poll()) != null) {
                 try {
-                    Boolean result = msg.sendTask.get().join();
+                    // D-8 fix (audit round 3): this used to be an UNBOUNDED join on
+                    // the server thread (WebhookManager.shutdown runs during
+                    // SERVER_STOPPING) - one hung webhook endpoint could hang the
+                    // entire server stop. Bounded wait: drop the message instead.
+                    Boolean result = msg.sendTask.get().get(10L, TimeUnit.SECONDS);
                     msg.future.complete(result != null && result != false);
                 }
                 catch (Exception e) {

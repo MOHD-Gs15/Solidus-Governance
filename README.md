@@ -104,6 +104,8 @@ Config-driven per-player transfer and auction limits with daily usage persistenc
 
 > **Enforcement scope (Governance 2.1.0 + Core 2.1.0+)**: Governance registers a transaction hook with Core at server start, so the emergency trading lock and frozen accounts are **always enforced inside Core's `/pay`, auction, and shop flows** — a denied transaction never moves money, and its reason is shown to the player. Daily limit enforcement inside Core requires a premium license (in free mode limit checks pass through while usage stays tracked and audited). Taxes are collected on settled transfers (sender), auction sales (seller), and shop purchases (buyer) whenever `taxation.enabled=true`. On older Core versions (< 2.1.0) or standalone mode, Governance degrades gracefully to tracking, status views, and violation logging only.
 
+> **Advisory note**: `limits.transfer.daily-max` covers player-to-player transfers (`/pay` and API transfers). Shop purchases and auction purchases move money through their own Core flows and are not counted against the daily transfer cap — treat the cap as a transfer-channel limit, not an economy-wide money-movement cap. Frozen sellers additionally cannot pocket auction proceeds: settlements onto a frozen account are escrowed into the treasury (audited as `FROZEN_PROCEEDS_ESCROW`).
+
 ### Taxation
 
 * Transfer, auction, and shop tax rates (validated to 0–100%, every change audited)
@@ -177,7 +179,7 @@ An observational engine that samples the economy on a background thread and repo
 | Anti-inflation, wealth caps, emergency lockdown | Policies, conditional rules, agent simulation |
 | Player economy profiles (balance, rank, status) | Weekly stats and flags in profiles |
 
-See [SECURITY.md](SECURITY.md) for the secrets policy — license keys, webhook URLs, and `SOLIDUS_LICENSE_SECRET` never belong in Git.
+See [SECURITY.md](SECURITY.md) for the secrets policy — license keys, webhook URLs, and signing keys never belong in Git.
 
 ---
 
@@ -194,7 +196,7 @@ See [SECURITY.md](SECURITY.md) for the secrets policy — license keys, webhook 
 5. Place the `.jar` file into your server's `mods/` folder
 6. Start the server — configuration is generated at `config/solidus-governance/governance.properties`
 
-**For premium features:** place your license key in `config/solidus-governance/license.key` (single line) before starting the server, and set the `SOLIDUS_LICENSE_SECRET` environment variable on the server process.
+**For premium features:** place your SA2 license key in `config/solidus-governance/license.key` (single line) before starting the server. No environment variables are needed — the vendor public key is embedded in the mod JAR, and the legacy `SOLIDUS_LICENSE_PUBLIC_KEY` / `solidus.license.publicKey` overrides are ignored (a customer-settable verification key would allow self-signed licenses). After replacing the key file, run `/governance license reverify` to activate it without a restart.
 
 **No client installation required.** Everything runs server-side; players notice nothing except fairer moderation.
 
@@ -360,7 +362,7 @@ com.solidus.governance/
 │   ├── DiscordWebhook.java     — Embed delivery with retry backoff
 │   └── WebhookRateLimiter.java — 5s rate limit, bounded queue
 ├── license/
-│   └── LicenseVerifier.java    — SA1 HMAC keys, server fingerprint
+│   └── LicenseVerifier.java    — SA2 Ed25519 verification (embedded vendor key, product-bound)
 ├── profile/
 │   ├── ProfileGenerator.java   — Balance, rank, weekly stats, flags
 │   └── PlayerProfile.java      — Profile model and formatters
