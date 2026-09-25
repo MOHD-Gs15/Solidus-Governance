@@ -118,24 +118,34 @@ public class RuleEngine {
     }
 
     public CompletableFuture<Void> evaluateAll() {
-        return ((CompletableFuture)this.computeContext().thenAccept(ctx -> {
-            if (ctx == null) {
-                SolidusGovernanceMod.LOGGER.warn("Rule evaluation skipped: economy context unavailable.");
-                return;
-            }
-            for (AutomationRule rule : this.rules.values()) {
-                if (!rule.isEnabled() || !rule.isOffCooldown() || !rule.evaluate((RuleContext)ctx)) continue;
-                SolidusGovernanceMod.LOGGER.info("Rule '{}' triggered! Executing {} actions...", (Object)rule.getName(), (Object)rule.getActions().size());
-                this.executeActions(rule);
-                rule.setLastTriggered(System.currentTimeMillis());
-                this.database.updateLastTriggered(rule.getName(), rule.getLastTriggered());
-                this.engine.getAuditLogger().logAutomation("RULE_TRIGGERED", "rule=" + rule.getName() + ";actions=" + rule.getActions().size() + ";conditions_met=" + rule.getConditions().size());
-                this.sendDiscordAlert("AUTOMATION", "Rule Triggered: " + rule.getName(), "Rule '" + rule.getName() + "' triggered with " + rule.getActions().size() + " actions. Cooldown: " + rule.getRemainingCooldownString());
-            }
-        })).exceptionally(ex -> {
-            SolidusGovernanceMod.LOGGER.error("Error during rule evaluation", ex);
-            return null;
-        });
+        // GOV-11 fix (reliability round): computeContext() may execute its
+        // callbacks SYNCHRONOUSLY on the calling thread whenever an inner
+        // future is already completed (Core absent -> completedFuture(null),
+        // legacy row-pull fallback). That dragged a synchronous 1000-row
+        // searchByCategory SQLite read straight into the server tick thread
+        // every 60 seconds in standalone mode. Starting the context computation
+        // on the common pool guarantees the reads stay off the server thread
+        // no matter which Core shape answers.
+        return CompletableFuture.supplyAsync(this::computeContext)
+            .thenCompose(contextFuture -> contextFuture)
+            .thenAccept(ctx -> {
+                if (ctx == null) {
+                    SolidusGovernanceMod.LOGGER.warn("Rule evaluation skipped: economy context unavailable.");
+                    return;
+                }
+                for (AutomationRule rule : this.rules.values()) {
+                    if (!rule.isEnabled() || !rule.isOffCooldown() || !rule.evaluate((RuleContext)ctx)) continue;
+                    SolidusGovernanceMod.LOGGER.info("Rule '{}' triggered! Executing {} actions...", (Object)rule.getName(), (Object)rule.getActions().size());
+                    this.executeActions(rule);
+                    rule.setLastTriggered(System.currentTimeMillis());
+                    this.database.updateLastTriggered(rule.getName(), rule.getLastTriggered());
+                    this.engine.getAuditLogger().logAutomation("RULE_TRIGGERED", "rule=" + rule.getName() + ";actions=" + rule.getActions().size() + ";conditions_met=" + rule.getConditions().size());
+                    this.sendDiscordAlert("AUTOMATION", "Rule Triggered: " + rule.getName(), "Rule '" + rule.getName() + "' triggered with " + rule.getActions().size() + " actions. Cooldown: " + rule.getRemainingCooldownString());
+                }
+            }).exceptionally(ex -> {
+                SolidusGovernanceMod.LOGGER.error("Error during rule evaluation", ex);
+                return null;
+            });
     }
 
     private CompletableFuture<RuleContext> computeContext() {

@@ -131,85 +131,124 @@ public class TaxEngine {
                         if (newBalance == null || !Double.isFinite(newBalance) || newBalance < 0.0) {
                             return CompletableFuture.completedFuture(0.0);
                         }
-                        String treasuryUuid = this.engine.getConfig().getString("taxation.treasury.account", "");
-                        CompletableFuture<Void> treasuryTransfer = CompletableFuture.completedFuture(null);
-                        if (!treasuryUuid.isBlank()) {
-                            try {
-                                UUID treasury = UUID.fromString(treasuryUuid);
-                                // D-3/B-4 fix (audit round 3): the deposit result used to be
-                                // IGNORED while a TREASURY_DEPOSIT audit row was written
-                                // unconditionally - a failed deposit silently destroyed the
-                                // player's money while the audit trail claimed success (exactly
-                                // what SECURITY.md forbids). The deposit is now checked; on
-                                // failure the debit is compensated back to the player, the
-                                // debt is re-parked for retry, and the audit trail records
-                                // what actually happened.
-                                treasuryTransfer = SolidusIntegration.addBalance(treasury, "Treasury", taxAmount)
-                                    .thenCompose(depositResult -> {
-                                        if (depositResult != null && depositResult >= 0.0) {
-                                            MinecraftServer treasuryServer = this.getServer();
-                                            if (this.engine != null && treasuryServer != null) {
-                                                treasuryServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT", taxAmount));
-                                            }
-                                            return CompletableFuture.completedFuture(null);
-                                        }
-                                        // Deposit failed: refund the player so no money is destroyed,
-                                        // then re-park the debt for a later retry.
-                                        SolidusGovernanceMod.LOGGER.error(
-                                            "Treasury deposit of {} for {} ({} tax) FAILED - refunding the player and re-parking the debt",
-                                            taxAmount, playerName, taxType);
-                                        MinecraftServer failureServer = this.getServer();
-                                        if (this.engine != null && failureServer != null) {
-                                            failureServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT_FAILED", taxAmount));
-                                        }
-                                        this.sendDiscordAlert("TAXATION", "Treasury Deposit Failed",
-                                            "A " + taxType + " tax of " + String.format("%.2f", taxAmount) + " from " + playerName
-                                                + " was collected but the treasury credit failed. The player was refunded and the debt is re-parked.");
-                                        return SolidusIntegration.addBalance(playerUuid, playerName, taxAmount)
-                                            .thenAccept(refundResult -> {
-                                                MinecraftServer refundServer = this.getServer();
-                                                if (refundResult == null || refundResult < 0.0) {
-                                                    SolidusGovernanceMod.LOGGER.error(
-                                                        "CRITICAL: refund of {} to {} ALSO failed after a failed treasury deposit - the amount is in limbo and needs manual reconciliation",
-                                                        taxAmount, playerName);
-                                                    if (this.engine != null && refundServer != null) {
-                                                        refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND_FAILED", taxAmount));
-                                                    }
-                                                    return;
-                                                }
-                                                if (this.engine != null && refundServer != null) {
-                                                    refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND", taxAmount));
-                                                }
-                                                this.enqueuePendingTax(playerUuid, playerName, taxType, taxAmount,
-                                                    "treasury deposit failed; player refunded");
-                                            })
-                                            .exceptionally(refundEx -> {
-                                                SolidusGovernanceMod.LOGGER.error(
-                                                    "Refund after failed treasury deposit threw for {}", playerName, refundEx);
-                                                return null;
-                                            });
-                                    })
-                                    .exceptionally(depositEx -> {
-                                        SolidusGovernanceMod.LOGGER.error(
-                                            "Treasury deposit threw for {} ({})", playerName, depositEx.toString());
-                                        return null;
-                                    });
-                            } catch (IllegalArgumentException ex) {
-                                SolidusGovernanceMod.LOGGER.warn("Invalid treasury UUID in governance config: {}", treasuryUuid);
-                            }
-                        }
-                        return treasuryTransfer.thenApply(ignored -> {
-                            MinecraftServer server = this.getServer();
-                            if (this.engine != null && server != null) {
-                                server.execute(() -> this.engine.getAuditLogger().logTaxCollection(playerUuid, playerName, taxType, taxAmount, before, newBalance));
-                            }
-                            if (taxAmount >= 10000.0) {
-                                this.sendDiscordAlert("TAXATION", "Large Tax Collection", "Type: " + taxType + ", Amount: " + String.format("%.2f", taxAmount) + ", Player: " + playerName);
-                            }
-                            return taxAmount;
-                        });
+                        return this.settleTreasury(playerUuid, playerName, taxType, taxAmount, before, newBalance);
                     });
             });
+    }
+
+    /**
+     * GOV-12 fix (reliability round): the treasury leg and the completion
+     * value of a tax collection are now one consistent decision.
+     *
+     * <p>Historically the deposit-failure path (D-3/B-4) refunded the player
+     * and re-parked the debt, but the surrounding chain STILL returned
+     * {@code taxAmount} and STILL wrote the success
+     * {@code logTaxCollection(before, newBalance)} audit row - so for a tax
+     * that was actually refunded, the permanent audit trail claimed a
+     * collection, and the retry sweeper marked the old debt row "collected"
+     * while a duplicate debt row tracked the same tax. No money was lost, but
+     * the books contradicted themselves exactly where admins look during an
+     * incident review.</p>
+     *
+     * <p>New contract: returns {@code taxAmount} only when the tax is truly
+     * settled - treasury credited, or no treasury configured (the revenue is
+     * then intentionally burned, documented behavior). Returns {@code 0.0}
+     * when the deposit failed and the player was refunded, so the caller
+     * ({@link #collectTaxAsync} or the retry sweeper) re-parks the debt
+     * exactly once. If the refund itself fails, the money already left the
+     * player; the amount is reported as taken (with CRITICAL limbo logs) so
+     * the debt can never be double-charged.</p>
+     */
+    private CompletableFuture<Double> settleTreasury(UUID playerUuid, String playerName, String taxType, double taxAmount, double before, double newBalance) {
+        String treasuryUuid = this.engine.getConfig().getString("taxation.treasury.account", "");
+        CompletableFuture<Boolean> depositOk;
+        if (treasuryUuid.isBlank()) {
+            // No treasury configured: tax revenue is intentionally burned
+            // (documented behavior) - the collection itself succeeded.
+            depositOk = CompletableFuture.completedFuture(Boolean.TRUE);
+        } else {
+            try {
+                UUID treasury = UUID.fromString(treasuryUuid);
+                // D-3/B-4 fix (audit round 3): the deposit result used to be
+                // IGNORED while a TREASURY_DEPOSIT audit row was written
+                // unconditionally - a failed deposit silently destroyed the
+                // player's money while the audit trail claimed success (exactly
+                // what SECURITY.md forbids). The deposit is now checked; on
+                // failure the debit is compensated back to the player and the
+                // debt is re-parked for retry.
+                depositOk = SolidusIntegration.addBalance(treasury, "Treasury", taxAmount)
+                    .thenApply(depositResult -> depositResult != null && depositResult >= 0.0)
+                    .exceptionally(depositEx -> {
+                        SolidusGovernanceMod.LOGGER.error(
+                            "Treasury deposit threw for {} ({})", playerName, depositEx.toString());
+                        return Boolean.FALSE;
+                    });
+            } catch (IllegalArgumentException ex) {
+                SolidusGovernanceMod.LOGGER.warn("Invalid treasury UUID in governance config: {}", treasuryUuid);
+                // Deposit impossible - treat exactly like a failed deposit:
+                // refund the player and re-park the debt rather than burning
+                // the money on a misconfiguration the admin can fix.
+                depositOk = CompletableFuture.completedFuture(Boolean.FALSE);
+            }
+        }
+        return depositOk.thenCompose(ok -> {
+            MinecraftServer server = this.getServer();
+            if (Boolean.TRUE.equals(ok)) {
+                if (this.engine != null && server != null) {
+                    server.execute(() -> {
+                        if (!treasuryUuid.isBlank()) {
+                            this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT", taxAmount);
+                        }
+                        this.engine.getAuditLogger().logTaxCollection(playerUuid, playerName, taxType, taxAmount, before, newBalance);
+                    });
+                }
+                if (taxAmount >= 10000.0) {
+                    this.sendDiscordAlert("TAXATION", "Large Tax Collection", "Type: " + taxType + ", Amount: " + String.format("%.2f", taxAmount) + ", Player: " + playerName);
+                }
+                return CompletableFuture.completedFuture(taxAmount);
+            }
+            // GOV-12 (reliability round): treasury deposit failed. The player
+            // is refunded here and the CALLER re-parks the debt exactly once
+            // (collectTaxAsync parks a fresh row; the retry sweeper keeps the
+            // existing one). No TAX_COLLECTION success row is written for a
+            // refunded tax.
+            SolidusGovernanceMod.LOGGER.error(
+                "Treasury deposit of {} for {} ({} tax) FAILED - refunding the player and re-parking the debt",
+                taxAmount, playerName, taxType);
+            if (this.engine != null && server != null) {
+                server.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "DEPOSIT_FAILED", taxAmount));
+            }
+            this.sendDiscordAlert("TAXATION", "Treasury Deposit Failed",
+                "A " + taxType + " tax of " + String.format("%.2f", taxAmount) + " from " + playerName
+                    + " was collected but the treasury credit failed. The player was refunded and the debt is re-parked.");
+            return SolidusIntegration.addBalance(playerUuid, playerName, taxAmount)
+                .thenApply(refundResult -> {
+                    MinecraftServer refundServer = this.getServer();
+                    if (refundResult == null || refundResult < 0.0) {
+                        SolidusGovernanceMod.LOGGER.error(
+                            "CRITICAL: refund of {} to {} ALSO failed after a failed treasury deposit - the amount is in limbo and needs manual reconciliation",
+                            taxAmount, playerName);
+                        if (this.engine != null && refundServer != null) {
+                            refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND_FAILED", taxAmount));
+                        }
+                        // The debit could not be compensated - treat the tax as
+                        // taken (it was) so the debt is never re-charged.
+                        return taxAmount;
+                    }
+                    if (this.engine != null && refundServer != null) {
+                        refundServer.execute(() -> this.engine.getAuditLogger().logTreasuryOperation(null, "System", "REFUND", taxAmount));
+                    }
+                    // Player is whole again - the debt is still owed and the
+                    // caller re-parks it exactly once.
+                    return 0.0;
+                })
+                .exceptionally(refundEx -> {
+                    SolidusGovernanceMod.LOGGER.error(
+                        "Refund after failed treasury deposit threw for {} - treating the tax as taken (manual reconciliation may be needed)",
+                        playerName, refundEx);
+                    return taxAmount;
+                });
+        });
     }
 
     /**

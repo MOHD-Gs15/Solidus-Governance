@@ -717,46 +717,68 @@ public class GovernanceCommand {
 
     private static int executeAuditRecent(CommandContext<CommandSourceStack> context, GovernanceEngine engine, int count) throws CommandSyntaxException {
         CommandSourceStack source = (CommandSourceStack)context.getSource();
-        List<AuditDatabase.AuditEntry> entries = engine.getAuditDatabase().getRecentAuditLogs(count);
-        if (entries.isEmpty()) {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No audit entries found.", ChatFormatting.GRAY));
-            return 1;
-        }
-        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550 Recent Audit (" + entries.size() + ") \u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
-        for (AuditDatabase.AuditEntry entry : entries) {
-            String time = LocalDateTime.ofInstant(Instant.ofEpochMilli(entry.timestamp), ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
-            ChatFormatting catColor = switch (entry.category) {
-                case "INTERVENTION" -> ChatFormatting.RED;
-                case "TAXATION" -> ChatFormatting.YELLOW;
-                case "RECOVERY" -> ChatFormatting.AQUA;
-                case "AUTOMATION" -> ChatFormatting.LIGHT_PURPLE;
-                default -> ChatFormatting.WHITE;
-            };
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  #" + entry.id + " ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + entry.category + "] ", catColor)).append((Component)GovernanceCommand.styled(entry.action + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled(entry.targetName != null ? entry.targetName : "", ChatFormatting.GRAY)).append((Component)GovernanceCommand.styled(" " + time, ChatFormatting.DARK_GRAY)));
-        }
-        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
+        // GOV-07 fix (reliability round): the SELECT used to run on the server
+        // thread, contending with the shared single-Connection audit writer.
+        // It now runs off-thread (the same pattern the CSV export uses).
+        CompletableFuture.supplyAsync(() -> engine.getAuditDatabase().getRecentAuditLogs(count))
+            .thenAccept(entries -> source.getServer().execute(() -> {
+                if (entries.isEmpty()) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No audit entries found.", ChatFormatting.GRAY));
+                    return;
+                }
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550 Recent Audit (" + entries.size() + ") \u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
+                for (AuditDatabase.AuditEntry entry : entries) {
+                    String time = LocalDateTime.ofInstant(Instant.ofEpochMilli(entry.timestamp), ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
+                    ChatFormatting catColor = switch (entry.category) {
+                        case "INTERVENTION" -> ChatFormatting.RED;
+                        case "TAXATION" -> ChatFormatting.YELLOW;
+                        case "RECOVERY" -> ChatFormatting.AQUA;
+                        case "AUTOMATION" -> ChatFormatting.LIGHT_PURPLE;
+                        default -> ChatFormatting.WHITE;
+                    };
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  #" + entry.id + " ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled("[" + entry.category + "] ", catColor)).append((Component)GovernanceCommand.styled(entry.action + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled(entry.targetName != null ? entry.targetName : "", ChatFormatting.GRAY)).append((Component)GovernanceCommand.styled(" " + time, ChatFormatting.DARK_GRAY)));
+                }
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to read audit log: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
     private static int executeAuditSearch(CommandContext<CommandSourceStack> context, GovernanceEngine engine, String searchType) throws CommandSyntaxException {
-        List<AuditDatabase.AuditEntry> entries;
         CommandSourceStack source = (CommandSourceStack)context.getSource();
+        // GOV-07 fix (reliability round): Brigadier arguments resolve on the
+        // server thread (they can throw CommandSyntaxException), but the
+        // SQLite search now runs off-thread (same pattern as audit recent).
         if ("player".equals(searchType)) {
             ServerPlayer player = EntityArgument.getPlayer(context, (String)"query");
-            entries = engine.getAuditDatabase().searchByTarget(player.getUUID(), 20);
+            GovernanceCommand.searchAuditAsync(source, () -> engine.getAuditDatabase().searchByTarget(player.getUUID(), 20));
         } else {
             String category = StringArgumentType.getString(context, (String)"query");
-            entries = engine.getAuditDatabase().searchByCategory(category, 20);
-        }
-        if (entries.isEmpty()) {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No matching audit entries found.", ChatFormatting.GRAY));
-        } else {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Found " + entries.size() + " entries:", ChatFormatting.WHITE));
-            for (AuditDatabase.AuditEntry entry : entries) {
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  #" + entry.id + " " + entry.action + " \u2014 " + entry.targetName, ChatFormatting.GRAY));
-            }
+            GovernanceCommand.searchAuditAsync(source, () -> engine.getAuditDatabase().searchByCategory(category, 20));
         }
         return 1;
+    }
+
+    /** GOV-07 helper: runs an audit search off-thread and renders the result. */
+    private static void searchAuditAsync(CommandSourceStack source, java.util.function.Supplier<List<AuditDatabase.AuditEntry>> query) {
+        CompletableFuture.supplyAsync(query::get)
+            .thenAccept(entries -> source.getServer().execute(() -> {
+                if (entries.isEmpty()) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No matching audit entries found.", ChatFormatting.GRAY));
+                } else {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Found " + entries.size() + " entries:", ChatFormatting.WHITE));
+                    for (AuditDatabase.AuditEntry entry : entries) {
+                        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  #" + entry.id + " " + entry.action + " \u2014 " + entry.targetName, ChatFormatting.GRAY));
+                    }
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Audit search failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
     }
 
     /**
@@ -953,7 +975,11 @@ public class GovernanceCommand {
     private static int executeDryRun(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
         int auditId = IntegerArgumentType.getInteger(context, (String)"auditId");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
-        engine.getRollbackEngine().dryRunRollback(null, auditId).thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
+        engine.getRollbackEngine().dryRunRollback(null, auditId).thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Dry run failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -980,7 +1006,11 @@ public class GovernanceCommand {
         long fromTimestamp = System.currentTimeMillis() - fromDays * 86_400_000L;
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Previewing rollback for " + player.getName().getString() + " (last " + fromDays + " day(s))...", ChatFormatting.YELLOW));
         engine.getRollbackEngine().dryRunRollbackPlayer(player.getUUID(), player.getName().getString(), fromTimestamp)
-            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Dry run failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -1019,36 +1049,48 @@ public class GovernanceCommand {
         }
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Previewing the rollback window between " + fromDays + " and " + toDays + " day(s) ago...", ChatFormatting.YELLOW));
         engine.getRollbackEngine().dryRunRollbackTimeframe(fromTimestamp, toTimestamp)
-            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))));
+            .thenAccept(result -> source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + result, ChatFormatting.YELLOW))))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Dry run failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
     private static int executeTimeline(CommandContext<CommandSourceStack> context, GovernanceEngine engine) throws CommandSyntaxException {
         ServerPlayer player = EntityArgument.getPlayer(context, (String)"player");
         CommandSourceStack source = (CommandSourceStack)context.getSource();
-        List<AuditDatabase.AuditEntry> timeline = engine.getRollbackEngine().getTransactionTimeline(player.getUUID(), 15);
-        if (timeline.isEmpty()) {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No transactions found for " + player.getName().getString(), ChatFormatting.GRAY));
-        } else {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("  Timeline for " + player.getName().getString() + ":", ChatFormatting.YELLOW));
-            for (AuditDatabase.AuditEntry entry : timeline) {
-                String time = LocalDateTime.ofInstant(Instant.ofEpochMilli(entry.timestamp), ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
-                Object change = "";
-                if (entry.beforeValue != null && entry.afterValue != null) {
-                    try {
-                        double before = Double.parseDouble(entry.beforeValue);
-                        double after = Double.parseDouble(entry.afterValue);
-                        double diff = after - before;
-                        change = (diff >= 0.0 ? "+" : "") + String.format("%.2f", diff);
-                    }
-                    catch (NumberFormatException before) {
-                        // empty catch block
-                    }
+        // GOV-07 fix (reliability round): the 15-row timeline SELECT used to
+        // run on the server thread; moved off-thread like the other reads.
+        CompletableFuture.supplyAsync(() -> engine.getRollbackEngine().getTransactionTimeline(player.getUUID(), 15))
+            .thenAccept(timelineEntries -> source.getServer().execute(() -> {
+                if (timelineEntries.isEmpty()) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  No transactions found for " + player.getName().getString(), ChatFormatting.GRAY));
+                    return;
                 }
-                ChatFormatting changeColor = ((String)change).startsWith("+") ? ChatFormatting.GREEN : (((String)change).startsWith("-") ? ChatFormatting.RED : ChatFormatting.GRAY);
-                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + time + " ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled(entry.action + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled((String)change, changeColor)));
-            }
-        }
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("  Timeline for " + player.getName().getString() + ":", ChatFormatting.YELLOW));
+                for (AuditDatabase.AuditEntry entry : timelineEntries) {
+                    String time = LocalDateTime.ofInstant(Instant.ofEpochMilli(entry.timestamp), ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("MM-dd HH:mm"));
+                    Object change = "";
+                    if (entry.beforeValue != null && entry.afterValue != null) {
+                        try {
+                            double before = Double.parseDouble(entry.beforeValue);
+                            double after = Double.parseDouble(entry.afterValue);
+                            double diff = after - before;
+                            change = (diff >= 0.0 ? "+" : "") + String.format("%.2f", diff);
+                        }
+                        catch (NumberFormatException before) {
+                            // empty catch block
+                        }
+                    }
+                    ChatFormatting changeColor = ((String)change).startsWith("+") ? ChatFormatting.GREEN : (((String)change).startsWith("-") ? ChatFormatting.RED : ChatFormatting.GRAY);
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  " + time + " ", ChatFormatting.DARK_GRAY).append((Component)GovernanceCommand.styled(entry.action + " ", ChatFormatting.WHITE)).append((Component)GovernanceCommand.styled((String)change, changeColor)));
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to read transaction timeline: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
         return 1;
     }
 
@@ -1424,13 +1466,19 @@ public class GovernanceCommand {
             return 0;
         }
         String eventId = StringArgumentType.getString(context, (String)"id");
+        // GOV-08 fix (reliability round): cancelEvent reverts live economy
+        // config - an async failure must not vanish silently. Every
+        // comparable command already had an .exceptionally handler.
         eventManager.cancelEvent(eventId).thenAccept(success -> source.getServer().execute(() -> {
             if (success.booleanValue()) {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Event " + eventId.substring(0, Math.min(8, eventId.length())) + "... cancelled and reverted.", ChatFormatting.GREEN));
             } else {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to cancel event. Event not found or already inactive.", ChatFormatting.RED));
             }
-        }));
+        })).exceptionally(ex -> {
+            source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Event cancellation failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+            return null;
+        });
         return 1;
     }
 
@@ -1535,6 +1583,12 @@ public class GovernanceCommand {
         ((CompletableFuture)engine.getProfileGenerator().generateProfile(player.getUUID(), player.getName().getString()).thenAccept(profile -> source.getServer().execute(() -> {
             boolean isPremium = engine.isPremiumEnabled();
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styledBold("\u2550\u2550\u2550\u2550\u2550\u2550\u2550 Economy Profile: " + player.getName().getString() + " \u2550\u2550\u2550\u2550\u2550\u2550\u2550", ChatFormatting.GOLD));
+            // GOV-09 fix (reliability round): a Core/leaderboard lookup failure
+            // used to render as confident zeros; the profile is now flagged and
+            // the admin is warned before acting on the numbers.
+            if (!profile.isDataComplete()) {
+                GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  \u26a0 PARTIAL DATA: " + profile.getIncompleteReason() + " - figures below may be unreliable.", ChatFormatting.RED));
+            }
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Balance: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(String.format("%,.2f", profile.getBalance()), ChatFormatting.WHITE)));
             GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rank: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(
                 profile.getRank() < 0 ? "beyond top " + ProfileGenerator.RANK_SCAN_LIMIT
@@ -1877,16 +1931,27 @@ public class GovernanceCommand {
             }
             return 0;
         }
+        // GOV-05 fix (reliability round): the account-count refresh opens its
+        // own JDBC connection to Core's economy.db and runs COUNT(*) (with a
+        // full-scan fallback) - that used to execute on the SERVER thread,
+        // a visible tick stall repeatable by any admin. The query now runs
+        // off-thread; feedback arrives asynchronously.
         GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Refreshing active account count from database...", ChatFormatting.YELLOW));
-        int count = simEngine.forceRefreshAccountCount();
-        if (count > 0) {
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Active Accounts (30d): ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(String.valueOf(count), ChatFormatting.GREEN)));
-            GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Adaptive Sample Size: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(simEngine.getAdaptiveSampleSize() + " players", ChatFormatting.AQUA)));
-            return 1;
-        }
-        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to refresh account count from database.", ChatFormatting.RED));
-        GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  The engine will continue using the cached value or online-player estimate.", ChatFormatting.YELLOW));
-        return 0;
+        simEngine.forceRefreshAccountCountAsync()
+            .thenAccept(count -> source.getServer().execute(() -> {
+                if (count > 0) {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Active Accounts (30d): ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(String.valueOf(count), ChatFormatting.GREEN)));
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Adaptive Sample Size: ", ChatFormatting.GRAY).append((Component)GovernanceCommand.styled(simEngine.getAdaptiveSampleSize() + " players", ChatFormatting.AQUA)));
+                } else {
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to refresh account count from database.", ChatFormatting.RED));
+                    GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  The engine will continue using the cached value or online-player estimate.", ChatFormatting.YELLOW));
+                }
+            }))
+            .exceptionally(ex -> {
+                source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to refresh account count: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+                return null;
+            });
+        return 1;
     }
 
     private static ChatFormatting colorForThrottle(String level) {
@@ -2018,7 +2083,10 @@ public class GovernanceCommand {
             } else {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Failed to create rule '" + name + "'. Name may already exist.", ChatFormatting.RED));
             }
-        }));
+        })).exceptionally(ex -> {
+            source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rule creation failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+            return null;
+        });
         return 1;
     }
 
@@ -2036,7 +2104,10 @@ public class GovernanceCommand {
             } else {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rule '" + name + "' not found.", ChatFormatting.RED));
             }
-        }));
+        })).exceptionally(ex -> {
+            source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rule toggle failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+            return null;
+        });
         return 1;
     }
 
@@ -2054,7 +2125,10 @@ public class GovernanceCommand {
             } else {
                 GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rule '" + name + "' not found.", ChatFormatting.RED));
             }
-        }));
+        })).exceptionally(ex -> {
+            source.getServer().execute(() -> GovernanceCommand.sendFeedback(source, (Component)GovernanceCommand.styled("  Rule deletion failed: " + ((Throwable)ex).getMessage(), ChatFormatting.RED)));
+            return null;
+        });
         return 1;
     }
 

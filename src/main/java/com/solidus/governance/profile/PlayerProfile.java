@@ -20,10 +20,30 @@ public class PlayerProfile {
     private double taxPaid7d;
     private int transactionCount7d;
     private final List<String> flags = new ArrayList<String>();
+    /** GOV-09 fix (reliability round): a partially-populated profile used to
+     *  render as confident real data ("Balance: 0.00, Rank #0 of 0") when a
+     *  Core lookup failed mid-generation. Failure paths now mark the profile
+     *  as partial so the command layer can warn the admin. */
+    private volatile boolean dataComplete = true;
+    private volatile String incompleteReason = null;
 
     public PlayerProfile(UUID playerUuid, String playerName) {
         this.playerUuid = playerUuid;
         this.playerName = playerName;
+    }
+
+    /** GOV-09: flags this profile as partially populated (data unreliable). */
+    public void markIncomplete(String reason) {
+        this.dataComplete = false;
+        this.incompleteReason = reason != null ? reason : "data source unavailable";
+    }
+
+    public boolean isDataComplete() {
+        return this.dataComplete;
+    }
+
+    public String getIncompleteReason() {
+        return this.incompleteReason;
     }
 
     public String formatProfile() {

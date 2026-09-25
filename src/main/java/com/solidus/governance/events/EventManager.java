@@ -65,10 +65,23 @@ public class EventManager {
                 // two concurrent same-type creations both pass the check and the
                 // second one captures the FIRST's modified value as "original" -
                 // the last revert then restores the modified value permanently.
-                for (EconomyEvent existing : this.activeEvents.values()) {
-                    if (!existing.getType().equals(normalizedType)) continue;
-                    SolidusGovernanceMod.LOGGER.warn("Event creation rejected: a {} event is already active ('{}'). Overlapping same-type events would corrupt config revert state.", new Object[]{normalizedType, existing.getName()});
-                    return null;
+                //
+                // GOV-01 fix (reliability round): the map/list mutations below
+                // used to run under createLock ONLY, while tickExpirations()
+                // iterates activeEvents and getAllEvents()/loadFromDatabase()
+                // iterate allEvents under THEIR OWN monitors - a create racing
+                // the server-tick expiration sweep threw
+                // ConcurrentModificationException straight into the server
+                // thread. Both collections are now mutated under their own
+                // monitors as well (createLock stays outermost; no other path
+                // takes the collection locks and then createLock, so no
+                // lock-order inversion is possible).
+                synchronized (this.activeEvents) {
+                    for (EconomyEvent existing : this.activeEvents.values()) {
+                        if (!existing.getType().equals(normalizedType)) continue;
+                        SolidusGovernanceMod.LOGGER.warn("Event creation rejected: a {} event is already active ('{}'). Overlapping same-type events would corrupt config revert state.", new Object[]{normalizedType, existing.getName()});
+                        return null;
+                    }
                 }
                 String eventId = UUID.randomUUID().toString();
                 long now = System.currentTimeMillis();
@@ -76,8 +89,12 @@ public class EventManager {
                 Map<String, String> originalValues = this.captureOriginalValues(normalizedType);
                 event = new EconomyEvent(eventId, name, normalizedType, modifier, now, endTime, creatorUuid.toString(), creatorName, originalValues, true);
                 this.applyEventModifications(event);
-                this.activeEvents.put(eventId, event);
-                this.allEvents.add(0, event);
+                synchronized (this.activeEvents) {
+                    this.activeEvents.put(eventId, event);
+                }
+                synchronized (this.allEvents) {
+                    this.allEvents.add(0, event);
+                }
                 this.database.saveEvent(event);
             }
             AuditLogger auditLogger = this.engine.getAuditLogger();

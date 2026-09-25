@@ -574,6 +574,20 @@ public class SimulationEngine {
         return this.adaptiveSampleSize.get();
     }
 
+    /**
+     * GOV-05 fix (reliability round): the command layer used to call
+     * {@link #forceRefreshAccountCount()} directly on the SERVER thread. The
+     * refresh opens a fresh JDBC connection to Core's economy.db and runs
+     * COUNT(*) queries (with a full-table-scan fallback when the
+     * last_updated column is missing) - a visible tick stall on large
+     * databases, repeatable by any admin via
+     * {@code /governance simulation refresh}. The query now runs off-thread
+     * and callers complete asynchronously.
+     */
+    public CompletableFuture<Integer> forceRefreshAccountCountAsync() {
+        return CompletableFuture.supplyAsync(this::forceRefreshAccountCount);
+    }
+
     public int forceRefreshAccountCount() {
         int count = this.queryActiveAccountCount();
         if (count > 0) {

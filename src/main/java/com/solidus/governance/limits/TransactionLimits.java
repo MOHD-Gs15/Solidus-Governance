@@ -217,7 +217,17 @@ public class TransactionLimits {
     }
 
     private void persistUsage(UUID player, DailyUsage usage) {
-        this.database.saveDailyUsage(player, this.currentDate, usage.transferTotal, usage.auctionCount);
+        // GOV-13 fix (reliability round): the two volatile fields were read
+        // OUTSIDE the per-usage monitor - a concurrent increment landing between
+        // the two reads persisted a torn (newTotal, oldCount) pair. Snapshot
+        // both fields under the same critical section the reservations use.
+        double transferTotal;
+        int auctionCount;
+        synchronized (usage) {
+            transferTotal = usage.transferTotal;
+            auctionCount = usage.auctionCount;
+        }
+        this.database.saveDailyUsage(player, this.currentDate, transferTotal, auctionCount);
     }
 
     private String usageKey(UUID player) {

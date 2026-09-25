@@ -49,7 +49,16 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> rollbackById(UUID adminUuid, String adminName, int auditId) {
-        AuditDatabase.AuditEntry entry = this.engine.getAuditDatabase().getAuditEntryById(auditId);
+        // GOV-07 fix (reliability round): the single-row getAuditEntryById read
+        // used to run on the calling (command/server) thread. Every read in the
+        // rollback paths now runs off-thread, consistent with the GOV-03 fix
+        // that already moved the timeframe read.
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().getAuditEntryById(auditId))
+            .thenCompose(entry -> this.applyRollbackById(adminUuid, adminName, auditId, entry))
+            .exceptionally(ex -> "Failed to roll back audit #" + auditId + ": " + ((Throwable)ex).getMessage());
+    }
+
+    private CompletableFuture<String> applyRollbackById(UUID adminUuid, String adminName, int auditId, AuditDatabase.AuditEntry entry) {
         if (entry == null) {
             return CompletableFuture.completedFuture("Audit entry #" + auditId + " not found.");
         }
@@ -98,7 +107,16 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> rollbackPlayer(UUID adminUuid, String adminName, UUID targetUuid, String targetName, long fromTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW);
+        // GOV-07 fix (reliability round): the 100-row searchByTarget read used
+        // to run on the calling (command/server) thread; it now runs off-thread
+        // like the GOV-03 timeframe read.
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW))
+            .thenCompose(entries -> this.applyRollbackPlayer(adminUuid, adminName, targetUuid, targetName, fromTimestamp, entries))
+            .exceptionally(ex -> "Failed to roll back player " + targetName + ": " + ((Throwable)ex).getMessage());
+    }
+
+    private CompletableFuture<String> applyRollbackPlayer(UUID adminUuid, String adminName, UUID targetUuid, String targetName, long fromTimestamp,
+                                                           List<AuditDatabase.AuditEntry> entries) {
         AuditDatabase.AuditEntry restoreEntry = RollbackEngine.selectRestoreEntry(entries, fromTimestamp, null);
         if (restoreEntry == null) {
             // A-3 fix (audit round 3): the bounded window (newest 100 rows for
@@ -159,7 +177,23 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> rollbackTimeframe(UUID adminUuid, String adminName, long fromTimestamp, long toTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW);
+        // GOV-03 fix (reliability round): this used to pull the newest
+        // ROLLBACK_TIMEFRAME_WINDOW (10,000) audit rows SYNCHRONOUSLY on the
+        // calling thread - the server/command thread. On a large WAL database
+        // under load that SELECT is a visible tick stall, repeatable by any
+        // admin. The row read now runs off-thread; the rollback lock is taken
+        // before the read so a queued second call still serializes.
+        if (!tryBeginRollback()) {
+            return CompletableFuture.completedFuture(BUSY_MESSAGE);
+        }
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW))
+            .thenCompose(entries -> this.applyTimeframeRollback(adminUuid, adminName, fromTimestamp, toTimestamp, entries))
+            .exceptionally(ex -> "Failed to roll back timeframe: " + ((Throwable)ex).getMessage())
+            .whenComplete((ignored, throwable) -> endRollback());
+    }
+
+    private CompletableFuture<String> applyTimeframeRollback(UUID adminUuid, String adminName, long fromTimestamp, long toTimestamp,
+                                                              List<AuditDatabase.AuditEntry> entries) {
         LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
             RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
         if (restorePerPlayer.isEmpty()) {
@@ -168,9 +202,6 @@ public class RollbackEngine {
             return CompletableFuture.completedFuture("No actions to roll back in the specified timeframe"
                 + " (searched the newest " + ROLLBACK_TIMEFRAME_WINDOW + " audit rows)."
                 + " If the incident is older than that window, narrow the timeframe or export the audit log.");
-        }
-        if (!tryBeginRollback()) {
-            return CompletableFuture.completedFuture(BUSY_MESSAGE);
         }
         ArrayList<CompletableFuture<Boolean>> rollbackFutures = new ArrayList<CompletableFuture<Boolean>>();
         for (Map.Entry<UUID, AuditDatabase.AuditEntry> restore : restorePerPlayer.entrySet()) {
@@ -203,7 +234,7 @@ public class RollbackEngine {
             }
             return "Rolled back " + rolledBack[0] + " unique players in timeframe (balance restored to the state before their earliest affected action;"
                 + " searched the newest " + ROLLBACK_TIMEFRAME_WINDOW + " audit rows).";
-        }).whenComplete((ignored, throwable) -> endRollback());
+        });
     }
 
     /** Shared selection logic for timeframe rollbacks and their dry-run preview. */
@@ -233,7 +264,13 @@ public class RollbackEngine {
     }
 
     public CompletableFuture<String> dryRunRollback(UUID adminUuid, int auditId) {
-        AuditDatabase.AuditEntry entry = this.engine.getAuditDatabase().getAuditEntryById(auditId);
+        // GOV-07: off-thread read, matching the real rollback path.
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().getAuditEntryById(auditId))
+            .thenCompose(entry -> this.dryRunRollbackFromEntry(auditId, entry))
+            .exceptionally(ex -> "[DRY RUN] Failed to load audit entry #" + auditId + ": " + ((Throwable)ex).getMessage());
+    }
+
+    private CompletableFuture<String> dryRunRollbackFromEntry(int auditId, AuditDatabase.AuditEntry entry) {
         if (entry == null) {
             return CompletableFuture.completedFuture("Audit entry #" + auditId + " not found.");
         }
@@ -275,7 +312,15 @@ public class RollbackEngine {
      * it does not take the rollback lock.
      */
     public CompletableFuture<String> dryRunRollbackPlayer(UUID targetUuid, String targetName, long fromTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW);
+        // GOV-07: the 100-row pre-read now runs off-thread, matching the real
+        // rollback path (GOV-03/GOV-07).
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().searchByTarget(targetUuid, ROLLBACK_PLAYER_WINDOW))
+            .thenCompose(entries -> this.dryRunRollbackPlayerFromEntries(targetUuid, targetName, fromTimestamp, entries))
+            .exceptionally(ex -> "[DRY RUN] Player rollback preview for " + targetName + " failed: " + ((Throwable)ex).getMessage());
+    }
+
+    private CompletableFuture<String> dryRunRollbackPlayerFromEntries(UUID targetUuid, String targetName, long fromTimestamp,
+                                                                        List<AuditDatabase.AuditEntry> entries) {
         AuditDatabase.AuditEntry restoreEntry = RollbackEngine.selectRestoreEntry(entries, fromTimestamp, null);
         if (restoreEntry == null) {
             return CompletableFuture.completedFuture(
@@ -314,7 +359,13 @@ public class RollbackEngine {
      * touching any balance. Read-only, so it does not take the rollback lock.
      */
     public CompletableFuture<String> dryRunRollbackTimeframe(long fromTimestamp, long toTimestamp) {
-        List<AuditDatabase.AuditEntry> entries = this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW);
+        // GOV-03 companion: same 10k-row read as the real rollback - off-thread too.
+        return CompletableFuture.supplyAsync(() -> this.engine.getAuditDatabase().getRecentAuditLogs(ROLLBACK_TIMEFRAME_WINDOW))
+            .thenCompose(entries -> this.dryRunRollbackTimeframeFromEntries(fromTimestamp, toTimestamp, entries));
+    }
+
+    private CompletableFuture<String> dryRunRollbackTimeframeFromEntries(long fromTimestamp, long toTimestamp,
+                                                                           List<AuditDatabase.AuditEntry> entries) {
         LinkedHashMap<UUID, AuditDatabase.AuditEntry> restorePerPlayer =
             RollbackEngine.selectTimeframeRestorePoints(entries, fromTimestamp, toTimestamp);
         if (restorePerPlayer.isEmpty()) {

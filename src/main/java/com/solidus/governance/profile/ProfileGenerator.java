@@ -29,7 +29,16 @@ public class ProfileGenerator {
     public CompletableFuture<PlayerProfile> generateProfile(UUID playerUuid, String playerName) {
         PlayerProfile profile = new PlayerProfile(playerUuid, playerName);
         return ((CompletableFuture)((CompletableFuture)((CompletableFuture)this.getBalance(playerUuid, playerName).thenCompose(balance -> {
-            profile.setBalance((double)balance);
+            // GOV-09 fix (reliability round): SolidusIntegration uses -1.0 as
+            // the "unavailable" sentinel (Core absent / UUID unresolvable).
+            // That used to flow straight into setBalance and render as the
+            // player's real balance; it is now detected and flagged.
+            if (balance == null || balance < 0.0) {
+                profile.setBalance(0.0);
+                profile.markIncomplete("balance lookup failed (Solidus Core unavailable or player unresolvable)");
+            } else {
+                profile.setBalance((double)balance);
+            }
             return this.getRank(playerUuid, playerName, profile);
         })).thenCompose(v -> {
             profile.setFrozen(this.engine.getAccountFreezer().isFrozen(playerUuid));
@@ -46,7 +55,12 @@ public class ProfileGenerator {
             SolidusGovernanceMod.LOGGER.debug("Generated economy profile for {} (rank #{}, flags: {})", new Object[]{playerName, profile.getRank(), flags.size()});
             return profile;
         })).exceptionally(ex -> {
+            // GOV-09: the half-built profile is still returned (frozen/suspicious
+            // state may be useful), but it is now explicitly marked as partial
+            // so the command layer can warn the admin instead of presenting
+            // zeros as fact.
             SolidusGovernanceMod.LOGGER.error("Failed to generate profile for {}", (Object)playerName, ex);
+            profile.markIncomplete("profile generation failed partway: " + ((Throwable)ex).getMessage());
             return profile;
         });
     }
@@ -54,7 +68,9 @@ public class ProfileGenerator {
     private CompletableFuture<Double> getBalance(UUID playerUuid, String playerName) {
         return SolidusIntegration.getBalance(playerUuid, playerName).exceptionally(ex -> {
             SolidusGovernanceMod.LOGGER.warn("Failed to get balance for {}: {}", (Object)playerName, (Object)((Throwable)ex).getMessage());
-            return 0.0;
+            // GOV-09: propagate the documented "unavailable" sentinel instead
+            // of 0.0 (which is indistinguishable from a real zero balance).
+            return -1.0;
         });
     }
 
@@ -79,6 +95,8 @@ public class ProfileGenerator {
                 SolidusGovernanceMod.LOGGER.warn("Failed to get rank for {}: {}", (Object)playerName, (Object)((Throwable)ex).getMessage());
                 profile.setRank(0);
                 profile.setTotalPlayers(0);
+                // GOV-09: "#0 of 0" is not a real ranking - flag the profile.
+                profile.markIncomplete("leaderboard lookup failed");
                 return null;
             });
     }

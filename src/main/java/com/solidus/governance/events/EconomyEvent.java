@@ -12,7 +12,9 @@ public class EconomyEvent {
     private final String creatorUuid;
     private final String creatorName;
     private Map<String, String> originalValues;
-    private boolean active;
+    // GOV-01 companion: active flips from both the server-tick expiration
+    // sweep and async cancelEvent/createEvent completions - keep it visible.
+    private volatile boolean active;
 
     public EconomyEvent(String id, String name, String type, double modifier, long startTime, long endTime, String creatorUuid, String creatorName, Map<String, String> originalValues, boolean active) {
         this.id = id;

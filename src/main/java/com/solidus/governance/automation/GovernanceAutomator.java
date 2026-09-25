@@ -3,12 +3,15 @@ package com.solidus.governance.automation;
 import com.solidus.governance.GovernanceConfig;
 import com.solidus.governance.SolidusGovernanceMod;
 import com.solidus.governance.engine.GovernanceEngine;
+import com.solidus.governance.events.EconomyEvent;
+import com.solidus.governance.events.EventManager;
 import com.solidus.governance.integration.SolidusIntegration;
 import com.solidus.governance.intervention.InterventionManager;
 import java.util.ArrayList;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import net.minecraft.server.MinecraftServer;
 
@@ -86,6 +89,17 @@ public class GovernanceAutomator {
             // lookup); skip rather than stack a second one on top.
             return;
         }
+        // GOV-06 fix (reliability round): the old finally block re-dispatched
+        // SolidusIntegration.getEconomyStats() (a second real SQL aggregate on
+        // modern Core, its result discarded) merely to decide whether to clear
+        // the in-flight flag - and the flag was released as soon as the stats
+        // future COMPLETED, before the legacy row-pull continuation finished.
+        // Worse, a stats future that never completed (hung Core storage)
+        // wedged the flag true forever, silently disabling anti-inflation until
+        // restart. The flag now releases exactly once, when the WHOLE
+        // evaluation chain terminates, and every future in the chain carries
+        // a timeout so a hung Core can no longer wedge the automation.
+        boolean releasedInline = false;
         try {
             double threshold = this.engine.getConfig().getDouble("automation.anti-inflation.threshold", 15.0);
             double currentAuctionRate = this.engine.getConfig().getDouble("taxation.auction.rate", 0.05);
@@ -93,44 +107,74 @@ public class GovernanceAutomator {
             // R28: prefer Core's single-query aggregates; only an old Core without
             // the API falls back to the legacy getTopBalances(100000) row pull.
             CompletableFuture<SolidusIntegration.EconomyStats> statsFuture = SolidusIntegration.getEconomyStats();
+            CompletableFuture<Void> evaluation;
             if (statsFuture != null) {
-                statsFuture
-                    .whenComplete((stats, statsEx) -> {
-                        try {
-                            if (statsEx != null || stats == null) {
-                                this.evaluateAntiInflationFromRows(threshold, currentAuctionRate, maxRate);
-                            } else {
-                                this.evaluateAntiInflation(stats.avgBalance(), threshold, currentAuctionRate, maxRate);
-                            }
-                        } finally {
-                            this.antiInflationInFlight.set(false);
+                evaluation = statsFuture
+                    .orTimeout(30L, TimeUnit.SECONDS)
+                    .thenCompose(stats -> {
+                        if (stats != null) {
+                            this.evaluateAntiInflation(stats.avgBalance(), threshold, currentAuctionRate, maxRate);
+                            return CompletableFuture.completedFuture(null);
                         }
+                        return this.evaluateAntiInflationFromRowsAsync(threshold, currentAuctionRate, maxRate);
                     });
-                return;
+            } else {
+                evaluation = this.evaluateAntiInflationFromRowsAsync(threshold, currentAuctionRate, maxRate);
             }
-            this.evaluateAntiInflationFromRows(threshold, currentAuctionRate, maxRate);
+            evaluation.whenComplete((ignored, evalEx) -> {
+                if (evalEx != null) {
+                    SolidusGovernanceMod.LOGGER.debug("Anti-inflation evaluation failed: {}", (Object)evalEx.toString());
+                }
+                this.antiInflationInFlight.set(false);
+            });
+            releasedInline = true;
         } finally {
-            // Synchronous fallback path finished inline; async paths clear the
-            // flag in their whenComplete above.
-            if (SolidusIntegration.getEconomyStats() == null) {
+            // An exception before the chain was armed must not wedge the flag.
+            if (!releasedInline) {
                 this.antiInflationInFlight.set(false);
             }
         }
     }
 
-    /** Legacy path: row pull to compute the average (old Core builds). */
-    private void evaluateAntiInflationFromRows(double threshold, double currentAuctionRate, double maxRate) {
-        SolidusIntegration.getTopBalances(100000).thenAccept(balances -> {
-            double totalSupply = 0.0;
-            for (SolidusIntegration.BalanceEntry entry : balances) {
-                totalSupply += entry.balance();
-            }
-            double avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
-            this.evaluateAntiInflation(avgBalance, threshold, currentAuctionRate, maxRate);
-        });
+    /**
+     * GOV-06: the legacy row-pull path now returns its future (bounded by a
+     * timeout) so the caller can release the in-flight guard only after the
+     * evaluation actually finished, and a hung Core storage cannot wedge the
+     * automation. Failures degrade to a skipped evaluation, never a stuck flag.
+     */
+    private CompletableFuture<Void> evaluateAntiInflationFromRowsAsync(double threshold, double currentAuctionRate, double maxRate) {
+        return SolidusIntegration.getTopBalances(100000)
+            .orTimeout(60L, TimeUnit.SECONDS)
+            .thenAccept(balances -> {
+                double totalSupply = 0.0;
+                for (SolidusIntegration.BalanceEntry entry : balances) {
+                    totalSupply += entry.balance();
+                }
+                double avgBalance = balances.isEmpty() ? 0.0 : totalSupply / (double)balances.size();
+                this.evaluateAntiInflation(avgBalance, threshold, currentAuctionRate, maxRate);
+            })
+            .exceptionally(ex -> {
+                SolidusGovernanceMod.LOGGER.warn("Anti-inflation: economy aggregation unavailable ({}); skipping this cycle", (Object)ex.toString());
+                return null;
+            });
     }
 
     private void evaluateAntiInflation(double avgBalance, double threshold, double currentAuctionRate, double maxRate) {
+        // GOV-14 fix (reliability round): while a TAX_HOLIDAY event is live it
+        // forces all tax rates to 0.0 - letting the anti-inflation automation
+        // raise taxation.auction.rate mid-event both lifted the holiday the
+        // admin had announced AND meant the event's revert (which restores the
+        // PRE-event rate) silently discarded the automation's change. The
+        // automation suspends itself until no TAX_HOLIDAY is active.
+        EventManager eventManager = this.engine.getEventManager();
+        if (eventManager != null) {
+            for (EconomyEvent active : eventManager.getActiveEvents()) {
+                if (!"TAX_HOLIDAY".equals(active.getType())) continue;
+                SolidusGovernanceMod.LOGGER.debug(
+                    "Anti-inflation: suspended while a TAX_HOLIDAY event ('{}') is active", (Object)active.getName());
+                return;
+            }
+        }
         if (avgBalance > threshold && currentAuctionRate < maxRate) {
             // COOLDOWN FIX: the periodic check runs every ~60s, and every
             // above-threshold check used to raise the auction rate by 0.01

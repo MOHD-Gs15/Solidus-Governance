@@ -74,23 +74,46 @@ public class WebhookRateLimiter {
 
     public void shutdown() {
         SolidusGovernanceMod.LOGGER.info("WebhookRateLimiter shutting down, flushing queue...");
+        // GOV-04 fix (reliability round): the D-8 bound was PER MESSAGE
+        // (10s each). With a full queue of 50 and a slow/hung endpoint, the
+        // flush could stall SERVER_STOPPING for up to ~8 minutes. The flush
+        // now has a TOTAL budget: per-message wait 5s, overall 30s; anything
+        // not delivered in that window is dropped with a log line.
+        final long perMessageTimeoutMs = 5_000L;
+        final long totalBudgetMs = 30_000L;
+        long deadline = System.currentTimeMillis() + totalBudgetMs;
+        int dropped = 0;
+        int flushed = 0;
         Queue<QueuedMessage> queue = this.queue;
         synchronized (queue) {
             QueuedMessage msg;
             while ((msg = this.queue.poll()) != null) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0L) {
+                    msg.future.complete(false);
+                    dropped++;
+                    continue;
+                }
                 try {
                     // D-8 fix (audit round 3): this used to be an UNBOUNDED join on
                     // the server thread (WebhookManager.shutdown runs during
                     // SERVER_STOPPING) - one hung webhook endpoint could hang the
                     // entire server stop. Bounded wait: drop the message instead.
-                    Boolean result = msg.sendTask.get().get(10L, TimeUnit.SECONDS);
+                    Boolean result = msg.sendTask.get().get(Math.min(perMessageTimeoutMs, remaining), TimeUnit.MILLISECONDS);
                     msg.future.complete(result != null && result != false);
+                    flushed++;
                 }
                 catch (Exception e) {
                     SolidusGovernanceMod.LOGGER.warn("WebhookRateLimiter: failed to flush message during shutdown", (Throwable)e);
                     msg.future.complete(false);
+                    dropped++;
                 }
             }
+        }
+        if (dropped > 0) {
+            SolidusGovernanceMod.LOGGER.warn(
+                "WebhookRateLimiter: dropped {} queued alert(s) during shutdown ({}s total budget exceeded or send failed); {} delivered.",
+                dropped, totalBudgetMs / 1000L, flushed);
         }
         this.scheduler.shutdown();
         try {
@@ -102,7 +125,7 @@ public class WebhookRateLimiter {
             this.scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
-        SolidusGovernanceMod.LOGGER.info("WebhookRateLimiter shut down complete.");
+        SolidusGovernanceMod.LOGGER.info("WebhookRateLimiter shut down complete ({} delivered, {} dropped).", flushed, dropped);
     }
 
     public int getQueueSize() {

@@ -103,7 +103,7 @@ public class InterventionManager {
                 if (newBalance < minBalance) {
                     newBalance = minBalance;
                 }
-                setFutures.add(SolidusIntegration.setBalance(null, entry.playerName(), newBalance).exceptionally(ex -> false));
+                setFutures.add(SolidusIntegration.setBalance(this.resolveBulkUuid(entry), entry.playerName(), newBalance).exceptionally(ex -> false));
             }
             if (setFutures.isEmpty()) {
                 return CompletableFuture.completedFuture(0);
@@ -129,7 +129,7 @@ public class InterventionManager {
         return SolidusIntegration.getTopBalances(100000).thenCompose(balances -> {
             ArrayList<CompletableFuture<Boolean>> setFutures = new ArrayList<CompletableFuture<Boolean>>();
             for (SolidusIntegration.BalanceEntry entry : balances) {
-                setFutures.add(SolidusIntegration.setBalance(null, entry.playerName(), amount).exceptionally(ex -> false));
+                setFutures.add(SolidusIntegration.setBalance(this.resolveBulkUuid(entry), entry.playerName(), amount).exceptionally(ex -> false));
             }
             if (setFutures.isEmpty()) {
                 return CompletableFuture.completedFuture(0);
@@ -149,6 +149,27 @@ public class InterventionManager {
                 return affected;
             });
         });
+    }
+
+    /**
+     * GOV-02 fix (reliability round): bulk operations used to resolve every
+     * account BY NAME (setBalance(null, playerName, ...)) even though Core
+     * >= 2.1.x leaderboard entries carry the account's real UUID - after a
+     * rename, or on offline-mode servers, a bulk multiply/set could write the
+     * WRONG player's balance (an irreversible admin intervention). The UUID
+     * is now used whenever Core supplies one; only a genuinely old Core
+     * degrades to name resolution, with a loud warning - the same contract
+     * TaxEngine.applyWealthDecay and GovernanceAutomator.checkWealthCaps
+     * already enforce.
+     */
+    private UUID resolveBulkUuid(SolidusIntegration.BalanceEntry entry) {
+        if (entry.uuid() != null) {
+            return entry.uuid();
+        }
+        SolidusGovernanceMod.LOGGER.warn(
+            "Bulk intervention: Core did not supply a UUID for '{}' - resolving by NAME (risky after renames; upgrade Core to 2.1.x+)",
+            entry.playerName());
+        return null;
     }
 
     public CompletableFuture<Boolean> forceReverse(UUID adminUuid, String adminName, int auditId) {

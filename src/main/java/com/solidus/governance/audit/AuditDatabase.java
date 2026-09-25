@@ -589,6 +589,16 @@ public class AuditDatabase {
         return null;
     }
 
+    /**
+     * Maximum rows {@link #getPlayerStats} will aggregate per invocation
+     * (GOV-10, reliability round). The query had NO limit: a bot-tier player
+     * with tens of thousands of audit rows inside the stats window produced
+     * an unbounded in-memory scan per profile - and profiles run the query
+     * twice (7-day and 24-hour windows). 50k rows per window is far beyond
+     * any legitimate player and keeps the scan bounded.
+     */
+    public static final int MAX_STATS_ROWS = 50_000;
+
     public PlayerStats getPlayerStats(UUID playerUuid, long fromTimestamp) {
         if (!this.initialized) {
             return null;
@@ -598,10 +608,11 @@ public class AuditDatabase {
         double taxPaid = 0.0;
         int transactionCount = 0;
         try {
-            String sql = "    SELECT action, category, before_value, after_value, details\n    FROM audit_log\n    WHERE target_uuid = ? AND timestamp >= ?\n    ORDER BY timestamp ASC\n";
+            String sql = "    SELECT action, category, before_value, after_value, details\n    FROM audit_log\n    WHERE target_uuid = ? AND timestamp >= ?\n    ORDER BY timestamp ASC\n    LIMIT ?\n";
             try (PreparedStatement ps = this.connection.prepareStatement(sql);){
                 ps.setString(1, playerUuid.toString());
                 ps.setLong(2, fromTimestamp);
+                ps.setInt(3, MAX_STATS_ROWS);
                 try (ResultSet rs = ps.executeQuery();){
                     block16: while (rs.next()) {
                         String details;
