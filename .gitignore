@@ -25,3 +25,7 @@ config/
 # Generated artifacts
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+
+# Family contract jar (audit W-5): committed on purpose so companion builds
+# are self-contained. Exception to the blanket *.jar rule above.
+!libs/*.jar

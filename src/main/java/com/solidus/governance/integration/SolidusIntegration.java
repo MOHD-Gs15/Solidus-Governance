@@ -1,9 +1,8 @@
 package com.solidus.governance.integration;
 
+import com.solidus.api.SolidusApi;
+import com.solidus.api.SolidusApiAccess;
 import com.solidus.governance.SolidusGovernanceMod;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -16,20 +15,34 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.players.NameAndId;
 import net.minecraft.server.players.UserNameToIdResolver;
 
+/**
+ * SolidusIntegration — direct bridge to Solidus Core through the
+ * <b>solidus-api</b> contract (family 2.3.0, audit W-5 fix).
+ *
+ * <p><b>What changed from 2.1.x:</b> this class used to hold a stack of
+ * {@link java.lang.invoke.MethodHandle}s that reflectively reached into
+ * Core's API class AND into Core internals
+ * ({@code EconomyEngine.getStorage().setBalance(...)}). A Core refactor
+ * broke those handles silently, and the fallback was "standalone DB mode"
+ * — an economy with no limits, no freezes and no taxes while the owner
+ * believed enforcement was active.</p>
+ *
+ * <p>Now Governance declares {@code "depends": { "solidus": ">=2.3.0 <3.0.0" }}
+ * in its fabric.mod.json, so Fabric's loader itself refuses to load
+ * Governance against a missing or incompatible Core — and this class makes
+ * plain, compile-checked calls against the versioned contract jar
+ * ({@code libs/solidus-api-<version>.jar}). If the contract changes shape,
+ * Governance fails to COMPILE, not to enforce.</p>
+ *
+ * <p>The public surface of this class (method names, signatures and the
+ * mirrored {@link BalanceEntry}/{@link EconomyStats} records) is unchanged
+ * from 2.1.x, so the rest of Governance needs no changes.</p>
+ */
 public class SolidusIntegration {
-    private static final MethodHandles.Lookup LOOKUP = MethodHandles.publicLookup();
     private static volatile boolean solidusLoaded = false;
-    private static volatile Object apiInstance = null;
-    private static MethodHandle getBalanceOfflineHandle;
-    private static MethodHandle addBalanceOfflineHandle;
-    private static MethodHandle subtractBalanceOfflineHandle;
-    private static MethodHandle getTopBalancesHandle;
-    private static MethodHandle getEconomyStatsHandle;
-    private static MethodHandle getEconomyEngineHandle;
-    private static MethodHandle getStorageHandle;
-    private static MethodHandle storageSetBalanceHandle;
+    private static volatile SolidusApi apiInstance = null;
     private static volatile MinecraftServer server;
-    private static final ConcurrentHashMap<String, UUID> nameToUuidCache;
+    private static final ConcurrentHashMap<String, UUID> nameToUuidCache = new ConcurrentHashMap<>();
 
     private SolidusIntegration() {
     }
@@ -43,43 +56,37 @@ public class SolidusIntegration {
     }
 
     public static void initialize() {
+        // Loader-level guarantee (fabric.mod.json depends): Core 2.3.0+ is on
+        // the classpath. The remaining failure modes are initialization-order
+        // (Core's entrypoint not yet run) — re-checked at every server start
+        // by CoreHookBridge.registerIfNeeded, mirroring the 2.1.x behavior.
         try {
             if (!FabricLoader.getInstance().isModLoaded("solidus")) {
-                SolidusGovernanceMod.LOGGER.info("Solidus Core not detected. Governance will operate in standalone DB mode.");
+                // Unreachable with a correct fabric.mod.json; kept as a hard,
+                // loud guard for misbuilt jars and dev-time misconfigurations.
+                SolidusGovernanceMod.LOGGER.error(
+                    "Solidus Core not detected despite the declared dependency - "
+                        + "Governance cannot enforce. Check the jar layout!");
                 solidusLoaded = false;
                 return;
             }
-            Class<?> apiClass = Class.forName("com.solidus.api.SolidusAPI");
-            MethodHandle getInstanceHandle = LOOKUP.findStatic(apiClass, "getInstance", MethodType.methodType(apiClass));
-            apiInstance = getInstanceHandle.invoke();
-            if (apiInstance == null) {
-                SolidusGovernanceMod.LOGGER.warn("SolidusAPI instance is null. Governance will operate in standalone DB mode.");
+            SolidusApi api = SolidusApiAccess.get();
+            if (api == null) {
+                SolidusGovernanceMod.LOGGER.warn(
+                    "SolidusApi contract not yet installed (Core still initializing). "
+                        + "CoreHookBridge will retry at server start.");
                 solidusLoaded = false;
                 return;
             }
-            getBalanceOfflineHandle = LOOKUP.findVirtual(apiClass, "getBalanceOffline", MethodType.methodType(CompletableFuture.class, UUID.class, String.class));
-            addBalanceOfflineHandle = LOOKUP.findVirtual(apiClass, "addBalanceOffline", MethodType.methodType(CompletableFuture.class, UUID.class, String.class, Double.TYPE));
-            subtractBalanceOfflineHandle = LOOKUP.findVirtual(apiClass, "subtractBalanceOffline", MethodType.methodType(CompletableFuture.class, UUID.class, String.class, Double.TYPE));
-            getTopBalancesHandle = LOOKUP.findVirtual(apiClass, "getTopBalances", MethodType.methodType(CompletableFuture.class, Integer.TYPE));
-            try {
-                // Core >= 2.1.x: economy-wide aggregates computed in SQL (R28).
-                // Old Cores lack the method - handle stays null and callers
-                // degrade to the legacy getTopBalances(100000) row pull.
-                getEconomyStatsHandle = LOOKUP.findVirtual(apiClass, "getEconomyStats", MethodType.methodType(CompletableFuture.class));
-            }
-            catch (NoSuchMethodException oldCore) {
-                SolidusGovernanceMod.LOGGER.info("SolidusAPI.getEconomyStats() not found (older Core) - stats consumers will fall back to row pulls.");
-            }
-            getEconomyEngineHandle = LOOKUP.findVirtual(apiClass, "getEconomyEngine", MethodType.methodType(Class.forName("com.solidus.economy.EconomyEngine")));
-            Class<?> economyEngineClass = Class.forName("com.solidus.economy.EconomyEngine");
-            getStorageHandle = LOOKUP.findVirtual(economyEngineClass, "getStorage", MethodType.methodType(Class.forName("com.solidus.economy.SQLiteStorage")));
-            Class<?> storageClass = Class.forName("com.solidus.economy.SQLiteStorage");
-            storageSetBalanceHandle = LOOKUP.findVirtual(storageClass, "setBalance", MethodType.methodType(CompletableFuture.class, UUID.class, String.class, Double.TYPE));
+            apiInstance = api;
             solidusLoaded = true;
-            SolidusGovernanceMod.LOGGER.info("Solidus Core integration established. Governance has full API access.");
+            SolidusGovernanceMod.LOGGER.info(
+                "Solidus Core integration established through the solidus-api contract (Core {}). "
+                    + "Governance has full API access.",
+                api.getCoreVersion());
         }
         catch (Throwable e) {
-            SolidusGovernanceMod.LOGGER.warn("Failed to integrate with Solidus Core: {}. Operating in standalone DB mode.", (Object)e.getMessage());
+            SolidusGovernanceMod.LOGGER.error("Failed to integrate with Solidus Core: {}", e.toString(), e);
             solidusLoaded = false;
         }
     }
@@ -89,13 +96,13 @@ public class SolidusIntegration {
     }
 
     /**
-     * Returns the raw SolidusAPI instance (may be null when Core is absent
-     * or detection has not succeeded yet). Exposed for the CoreHookBridge,
-     * which registers an enforcement hook through the API surface.
+     * Returns the SolidusApi contract instance (may be null when Core is
+     * absent or detection has not succeeded yet). Exposed for the
+     * CoreHookBridge, which registers the enforcement hook directly.
      *
-     * @since 1.2.0
+     * @since 2.3.0 (was Object — now the typed contract)
      */
-    public static Object getApi() {
+    public static SolidusApi getApi() {
         return apiInstance;
     }
 
@@ -150,7 +157,7 @@ public class SolidusIntegration {
             return CompletableFuture.completedFuture(-1.0);
         }
         try {
-            return (CompletableFuture<Double>) getBalanceOfflineHandle.invoke(apiInstance, effectiveUuid, playerName);
+            return apiInstance.getBalance(effectiveUuid, playerName);
         }
         catch (Throwable e) {
             SolidusGovernanceMod.LOGGER.error("Failed to get balance for {}", (Object)effectiveUuid, (Object)e);
@@ -169,7 +176,7 @@ public class SolidusIntegration {
             return CompletableFuture.completedFuture(-1.0);
         }
         try {
-            return (CompletableFuture<Double>) addBalanceOfflineHandle.invoke(apiInstance, effectiveUuid, playerName, amount);
+            return apiInstance.addBalance(effectiveUuid, playerName, amount);
         }
         catch (Throwable e) {
             SolidusGovernanceMod.LOGGER.error("Failed to add balance for {}", (Object)effectiveUuid, (Object)e);
@@ -188,7 +195,7 @@ public class SolidusIntegration {
             return CompletableFuture.completedFuture(-1.0);
         }
         try {
-            return (CompletableFuture<Double>) subtractBalanceOfflineHandle.invoke(apiInstance, effectiveUuid, playerName, amount);
+            return apiInstance.subtractBalance(effectiveUuid, playerName, amount);
         }
         catch (Throwable e) {
             SolidusGovernanceMod.LOGGER.error("Failed to subtract balance for {}", (Object)effectiveUuid, (Object)e);
@@ -196,6 +203,12 @@ public class SolidusIntegration {
         }
     }
 
+    /**
+     * Administrative balance overwrite (rollback restores, corrections).
+     * Used to reach into Core's SQLiteStorage internal via MethodHandles —
+     * now a first-class, ledger-journaled API operation with an audit
+     * reason (audit W-5).
+     */
     public static CompletableFuture<Boolean> setBalance(UUID uuid, String playerName, double amount) {
         UUID effectiveUuid;
         if (!solidusLoaded || apiInstance == null) {
@@ -207,15 +220,8 @@ public class SolidusIntegration {
             return CompletableFuture.completedFuture(false);
         }
         try {
-            Object engine = getEconomyEngineHandle.invoke(apiInstance);
-            if (engine == null) {
-                return CompletableFuture.completedFuture(false);
-            }
-            Object storage = getStorageHandle.invoke(engine);
-            if (storage == null) {
-                return CompletableFuture.completedFuture(false);
-            }
-            return (CompletableFuture<Boolean>) storageSetBalanceHandle.invoke(storage, effectiveUuid, playerName, amount);
+            return apiInstance.setBalance(effectiveUuid, playerName, amount,
+                "governance restore/correction via solidus-api");
         }
         catch (Throwable e) {
             SolidusGovernanceMod.LOGGER.error("Failed to set balance for {}", (Object)effectiveUuid, (Object)e);
@@ -228,32 +234,13 @@ public class SolidusIntegration {
             return CompletableFuture.completedFuture(List.of());
         }
         try {
-            CompletableFuture<?> rawFuture = (CompletableFuture<?>) getTopBalancesHandle.invoke(apiInstance, limit);
-            return rawFuture.thenApply(rawObject -> {
-                List<?> rawList = rawObject instanceof List<?> list ? list : List.of();
-                ArrayList<BalanceEntry> result = new ArrayList<>(rawList.size());
-                for (Object entry : rawList) {
-                    try {
-                        int rank = (Integer)entry.getClass().getMethod("rank", new Class[0]).invoke(entry, new Object[0]);
-                        String name = (String)entry.getClass().getMethod("playerName", new Class[0]).invoke(entry, new Object[0]);
-                        double balance = (Double)entry.getClass().getMethod("balance", new Class[0]).invoke(entry, new Object[0]);
-                        // Core >= 2.1.x BalanceEntry carries the player's UUID;
-                        // older Cores do not (accessor absent) - uuid stays null
-                        // and callers must degrade to name resolution knowingly.
-                        UUID uuid = null;
-                        try {
-                            uuid = (UUID)entry.getClass().getMethod("uuid", new Class[0]).invoke(entry, new Object[0]);
-                        } catch (NoSuchMethodException oldCore) {
-                            SolidusGovernanceMod.LOGGER.debug(
-                                "Core BalanceEntry has no uuid accessor (older Core) - wealth cap will resolve by name");
-                        }
-                        result.add(new BalanceEntry(uuid, rank, name, balance));
-                    }
-                    catch (Exception e) {
-                        SolidusGovernanceMod.LOGGER.debug("Failed to map BalanceEntry via reflection", (Throwable)e);
-                    }
+            return apiInstance.getTopBalances(limit).thenApply(entries -> {
+                ArrayList<BalanceEntry> result = new ArrayList<>(entries.size());
+                for (com.solidus.api.BalanceEntry entry : entries) {
+                    result.add(new BalanceEntry(entry.uuid(), entry.rank(),
+                        entry.playerName(), entry.balance()));
                 }
-                return result;
+                return (List<BalanceEntry>)result;
             });
         }
         catch (Throwable e) {
@@ -262,39 +249,22 @@ public class SolidusIntegration {
         }
     }
 
-    static {
-        nameToUuidCache = new ConcurrentHashMap();
-    }
-
     /**
      * Economy-wide aggregates computed inside Core with one SQL query (R28):
      * count, mean balance, money supply, and the Gini coefficient - without
      * materializing any balance rows. Returns null (inside a completed
-     * future) when Core is absent or predates the API, signaling callers to
-     * fall back to the legacy {@link #getTopBalances(int)} row pull.
+     * future) when Core is absent, signaling callers to fall back to the
+     * legacy {@link #getTopBalances(int)} row pull.
      */
     public static CompletableFuture<EconomyStats> getEconomyStats() {
-        if (!solidusLoaded || apiInstance == null || getEconomyStatsHandle == null) {
+        if (!solidusLoaded || apiInstance == null) {
             return CompletableFuture.completedFuture(null);
         }
         try {
-            CompletableFuture<?> raw = (CompletableFuture<?>) getEconomyStatsHandle.invoke(apiInstance);
-            return raw.thenApply(obj -> {
-                if (obj == null) {
-                    return null;
-                }
-                try {
-                    int playerCount = (Integer)obj.getClass().getMethod("playerCount", new Class[0]).invoke(obj, new Object[0]);
-                    double avg = (Double)obj.getClass().getMethod("avgBalance", new Class[0]).invoke(obj, new Object[0]);
-                    double supply = (Double)obj.getClass().getMethod("totalSupply", new Class[0]).invoke(obj, new Object[0]);
-                    double gini = (Double)obj.getClass().getMethod("giniCoefficient", new Class[0]).invoke(obj, new Object[0]);
-                    return new EconomyStats(playerCount, avg, supply, gini);
-                }
-                catch (Exception e) {
-                    SolidusGovernanceMod.LOGGER.debug("Failed to map EconomyStats via reflection", (Throwable)e);
-                    return null;
-                }
-            });
+            return apiInstance.getEconomyStats().thenApply(stats -> stats == null
+                ? null
+                : new EconomyStats(stats.playerCount(), stats.avgBalance(),
+                    stats.totalSupply(), stats.giniCoefficient()));
         }
         catch (Throwable e) {
             SolidusGovernanceMod.LOGGER.error("Failed to get economy stats", e);
@@ -302,7 +272,7 @@ public class SolidusIntegration {
         }
     }
 
-    /** Mirror of Core's SQLiteStorage.EconomyStats (reflection-mapped). */
+    /** Mirror of the solidus-api EconomyStats contract record. */
     public record EconomyStats(int playerCount, double avgBalance, double totalSupply, double giniCoefficient) {
     }
 

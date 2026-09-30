@@ -1,5 +1,8 @@
 package com.solidus.governance.integration;
 
+import com.solidus.api.SolidusApi;
+import com.solidus.api.SolidusApiAccess;
+import com.solidus.api.SolidusTransactionHook;
 import com.solidus.governance.SolidusGovernanceMod;
 import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.intervention.AccountFreezer;
@@ -7,17 +10,15 @@ import com.solidus.governance.intervention.InterventionManager;
 import com.solidus.governance.limits.TransactionLimits;
 import com.solidus.governance.taxation.TaxEngine;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import net.minecraft.server.MinecraftServer;
 
 /**
- * CoreHookBridge - Registers Solidus Governance as a
- * {@code com.solidus.api.SolidusTransactionHook} on Solidus Core 2.1.0+.
+ * CoreHookBridge — registers Solidus Governance as a
+ * {@code com.solidus.api.SolidusTransactionHook} on Solidus Core 2.3.0+.
  *
  * <p>This is the enforcement bridge that was previously missing: Core calls
  * the hook at every money-movement point, and Governance answers with its
@@ -33,10 +34,16 @@ import net.minecraft.server.MinecraftServer;
  *       auction tax on the seller at sale time, shop tax on the buyer).</li>
  * </ul>
  *
- * <p><b>Zero compile dependency:</b> the hook is a {@link Proxy} implementing
- * Core's hook interface by name; every Core type is resolved reflectively.
- * If Core is absent or older than 2.1.0, registration degrades gracefully
- * and Governance keeps operating in standalone DB mode.</p>
+ * <p><b>2.3.0 (audit W-5): direct implementation.</b> This class used to
+ * register a reflective {@link java.lang.reflect.Proxy} that implemented
+ * Core's hook interface by name — zero compile dependency, zero type
+ * safety, and every Core signature drift became a runtime "standalone
+ * mode" fallback (no limits, no freezes, no taxes). Now Governance compiles
+ * against the <b>solidus-api</b> contract jar and implements the hook
+ * interface directly; a Core change that breaks the contract breaks this
+ * build at compile time, and fabric.mod.json's
+ * {@code "depends": { "solidus": ">=2.3.0 <3.0.0" }} makes the loader
+ * reject incompatible Core versions before either mod initializes.</p>
  *
  * <p><b>Threading:</b> veto answers are in-memory reads (volatile flags,
  * concurrent maps) plus Governance's own small limits DB on first touch of
@@ -65,7 +72,7 @@ import net.minecraft.server.MinecraftServer;
  * behavior. Post-settlement notification hooks ({@code afterXxx}) keep
  * failing open: recording/tax failures must never corrupt settled state.</p>
  *
- * @since 1.2.0
+ * @since 1.2.0 (direct implementation since 2.3.0)
  */
 public final class CoreHookBridge {
 
@@ -73,7 +80,7 @@ public final class CoreHookBridge {
     private static final String GENERIC_DENY = "Transaction denied by server policy.";
 
     private static final AtomicBoolean REGISTERED = new AtomicBoolean(false);
-    private static volatile Object registeredProxy;
+    private static volatile GovernanceHookHandler registeredHook;
 
     private CoreHookBridge() {
     }
@@ -99,40 +106,36 @@ public final class CoreHookBridge {
             SolidusIntegration.initialize();
         }
         if (!SolidusIntegration.isSolidusLoaded()) {
-            SolidusGovernanceMod.LOGGER.info(
-                "CoreHookBridge: Solidus Core not detected - limit/lock/tax enforcement stays in standalone mode.");
+            SolidusGovernanceMod.LOGGER.error(
+                "CoreHookBridge: Solidus Core contract unavailable - limit/lock/tax enforcement "
+                    + "CANNOT run. Governance now hard-depends on Solidus Core (>=2.3.0 <3.0.0); "
+                    + "the loader should have refused this combination. Verify the installed jars.");
             return;
         }
         try {
-            Class<?> hookInterface = Class.forName("com.solidus.api.SolidusTransactionHook");
-            Object api = SolidusIntegration.getApi();
+            SolidusApi api = SolidusApiAccess.get();
             if (api == null) {
-                SolidusGovernanceMod.LOGGER.warn("CoreHookBridge: SolidusAPI instance unavailable - hook not registered.");
+                SolidusGovernanceMod.LOGGER.warn("CoreHookBridge: SolidusApi instance unavailable - hook not registered.");
                 return;
             }
 
-            Object proxy = Proxy.newProxyInstance(
-                hookInterface.getClassLoader(),
-                new Class<?>[]{hookInterface},
-                new GovernanceHookHandler(engine, hookInterface));
-
-            Method register = api.getClass().getMethod("registerTransactionHook", hookInterface);
-            Object result = register.invoke(api, proxy);
-            if (Boolean.TRUE.equals(result)) {
-                registeredProxy = proxy;
+            GovernanceHookHandler hook = new GovernanceHookHandler(engine);
+            if (api.registerTransactionHook(hook)) {
+                registeredHook = hook;
                 REGISTERED.set(true);
                 SolidusGovernanceMod.LOGGER.info(
-                    "CoreHookBridge: enforcement hook registered with Solidus Core "
-                        + "(trading lock, freezes, limits, taxes are now enforced inside Core flows).");
+                    "CoreHookBridge: enforcement hook registered with Solidus Core {} "
+                        + "(trading lock, freezes, limits, taxes are now enforced inside Core flows).",
+                    api.getCoreVersion());
             } else {
                 SolidusGovernanceMod.LOGGER.warn(
-                    "CoreHookBridge: Core rejected hook registration (duplicate name or old Core) - continuing without Core-side enforcement.");
+                    "CoreHookBridge: Core rejected hook registration (duplicate name) - continuing without Core-side enforcement.");
             }
         } catch (Throwable t) {
-            // Old Core (< 2.1.0) without the hook API lands here - not an error.
-            SolidusGovernanceMod.LOGGER.info(
-                "CoreHookBridge: Core hook API unavailable ({}). Upgrade Core to 2.1.0+ for inside-Core enforcement.",
-                t.getClass().getSimpleName());
+            SolidusGovernanceMod.LOGGER.error(
+                "CoreHookBridge: Core hook registration failed ({}). Enforcement cannot run - "
+                    + "this is a build/loader inconsistency, see the stack trace.",
+                t);
         }
     }
 
@@ -141,216 +144,201 @@ public final class CoreHookBridge {
      * unhooked until the next successful registration.
      */
     public static void unregister() {
-        Object proxy = registeredProxy;
-        if (proxy == null || !REGISTERED.getAndSet(false)) {
-            registeredProxy = null;
+        GovernanceHookHandler hook = registeredHook;
+        if (hook == null || !REGISTERED.getAndSet(false)) {
+            registeredHook = null;
             return;
         }
         try {
-            Class<?> hookInterface = Class.forName("com.solidus.api.SolidusTransactionHook");
-            Object api = SolidusIntegration.getApi();
+            SolidusApi api = SolidusApiAccess.get();
             if (api != null) {
-                api.getClass()
-                    .getMethod("unregisterTransactionHook", hookInterface)
-                    .invoke(api, proxy);
+                api.unregisterTransactionHook(hook);
             }
             SolidusGovernanceMod.LOGGER.info("CoreHookBridge: enforcement hook unregistered.");
         } catch (Throwable t) {
             SolidusGovernanceMod.LOGGER.debug("CoreHookBridge: unregister failed ({}).", t.toString());
         } finally {
-            registeredProxy = null;
+            registeredHook = null;
         }
     }
 
     // -- The actual hook logic ------------------------------------------
 
-    private static final class GovernanceHookHandler implements InvocationHandler {
+    /**
+     * Direct, compile-checked implementation of Core's hook interface
+     * (2.3.0 — previously a reflective Proxy).
+     */
+    private static final class GovernanceHookHandler implements SolidusTransactionHook {
         private final GovernanceEngine engine;
-        private final Class<?> hookInterface;
-        private final Object allowDecision;
-        private final Method denyFactory;
 
-        GovernanceHookHandler(GovernanceEngine engine, Class<?> hookInterface) throws Exception {
+        GovernanceHookHandler(GovernanceEngine engine) {
             this.engine = engine;
-            this.hookInterface = hookInterface;
-            Class<?> decisionClass = Class.forName("com.solidus.api.SolidusTransactionHook$Decision");
-            this.allowDecision = decisionClass.getField("ALLOW").get(null);
-            this.denyFactory = decisionClass.getMethod("deny", String.class);
-        }
-
-        private Object deny(String reason) throws Exception {
-            return denyFactory.invoke(null, reason != null ? reason : GENERIC_DENY);
         }
 
         @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            String name = method.getName();
+        public String name() {
+            return HOOK_NAME;
+        }
 
-            // Object methods
-            switch (name) {
-                case "toString":
-                    return "SolidusTransactionHook(" + HOOK_NAME + ")";
-                case "hashCode":
-                    return System.identityHashCode(proxy);
-                case "equals":
-                    return proxy == args[0];
-                default:
-                    break;
-            }
+        // ---- Veto hooks (fail-closed on throw) ----
 
-            try {
-                switch (name) {
-                    case "name":
-                        return HOOK_NAME;
+        @Override
+        public Decision allowTransfer(UUID senderUuid, String senderName,
+                                      UUID receiverUuid, String receiverName,
+                                      double amount) {
+            return vetoGuard("allowTransfer", () -> {
+                Decision decision = vetoTrading(senderUuid);
+                if (decision != null) return decision;
+                Decision limit = vetoTransferLimit(senderUuid, amount);
+                if (limit != null) return limit;
+                // A freeze is an asset freeze, not just a spending ban:
+                // a frozen account must not be able to receive funds.
+                Decision receiverFrozen = vetoReceiverFrozen(receiverUuid);
+                if (receiverFrozen != null) return receiverFrozen;
+                return null;
+            });
+        }
 
-                    // ---- Veto hooks ----
-                    case "allowTransfer": {
-                        // (senderUuid, senderName, receiverUuid, receiverName, amount)
-                        UUID sender = (UUID) args[0];
-                        UUID receiver = (UUID) args[2];
-                        double amount = (Double) args[4];
-                        Object decision = vetoTrading(sender);
-                        if (decision != null) return decision;
-                        Object limit = vetoTransferLimit(sender, amount);
-                        if (limit != null) return limit;
-                        // A freeze is an asset freeze, not just a spending ban:
-                        // a frozen account must not be able to receive funds.
-                        Object receiverFrozen = vetoReceiverFrozen(receiver);
-                        if (receiverFrozen != null) return receiverFrozen;
-                        return allowDecision;
-                    }
-                    case "allowAuctionListing": {
-                        // (sellerUuid, sellerName, price)
-                        UUID seller = (UUID) args[0];
-                        Object decision = vetoTrading(seller);
-                        if (decision != null) return decision;
-                        TransactionLimits limits = engine.getTransactionLimits();
-                        if (limits != null && !limits.checkAuctionLimit(seller)) {
-                            return deny("Daily auction listing limit reached.");
-                        }
-                        return allowDecision;
-                    }
-                    case "allowAuctionPurchase": {
-                        // (buyerUuid, buyerName, price)
-                        Object decision = vetoTrading((UUID) args[0]);
-                        return decision != null ? decision : allowDecision;
-                    }
-                    case "allowShopPurchase": {
-                        // (playerUuid, playerName, cost)
-                        Object decision = vetoTrading((UUID) args[0]);
-                        return decision != null ? decision : allowDecision;
-                    }
-                    case "allowShopSell": {
-                        // (playerUuid, playerName)
-                        Object decision = vetoTrading((UUID) args[0]);
-                        return decision != null ? decision : allowDecision;
-                    }
-
-                    // ---- Notification hooks ----
-                    case "afterTransfer": {
-                        // (senderUuid, senderName, receiverUuid, receiverName, amount)
-                        UUID sender = (UUID) args[0];
-                        String senderName = (String) args[1];
-                        double amount = (Double) args[4];
-                        TransactionLimits limits = engine.getTransactionLimits();
-                        if (limits != null) {
-                            limits.recordTransfer(sender, amount);
-                        }
-                        collectTax("TRANSFER", sender, senderName,
-                            engine.getTaxEngine() != null
-                                ? engine.getTaxEngine().calculateTransferTax(amount) : 0.0);
-                        collectProgressiveTransferTax(sender, senderName, amount);
-                        return null;
-                    }
-                    case "afterAuctionListing": {
-                        // (sellerUuid, sellerName, price, fee)
-                        TransactionLimits limits = engine.getTransactionLimits();
-                        if (limits != null) {
-                            limits.recordAuctionListing((UUID) args[0]);
-                        }
-                        return null;
-                    }
-                    case "afterAuctionSale": {
-                        // (sellerUuid, sellerName, buyerUuid, buyerName, price)
-                        UUID seller = (UUID) args[0];
-                        String sellerName = (String) args[1];
-                        double price = (Double) args[4];
-
-                        // B-2 fix (audit round 3): Core's settlement moves the buyer's
-                        // money straight into the seller's balance WITHOUT consulting
-                        // allowTransfer (the auction flow deliberately skips the generic
-                        // transfer hooks), and allowAuctionPurchase only vetoes the BUYER.
-                        // A frozen seller's pre-existing listings therefore kept funneling
-                        // money into a frozen ("asset-frozen") account - laundering into
-                        // untouchable escrow. CoreHookBridge's own freeze contract states
-                        // "a frozen account must not be able to receive funds", so the
-                        // proceeds of a settlement onto a frozen seller are clawed back
-                        // into the treasury here, with a full audit trail. New listings
-                        // are already blocked by the allowAuctionListing freeze veto;
-                        // auction tax on the frozen seller is skipped (their proceeds are
-                        // escrowed - charging tax out of pre-existing funds would
-                        // double-punish the freeze).
-                        AccountFreezer freezer = engine.getAccountFreezer();
-                        if (freezer != null && seller != null && freezer.isFrozen(seller)) {
-                            escrowFrozenAuctionProceeds(seller, sellerName, price);
-                            return null;
-                        }
-
-                        collectTax("AUCTION_SALE", seller, sellerName,
-                            engine.getTaxEngine() != null
-                                ? engine.getTaxEngine().calculateAuctionTax(price) : 0.0);
-                        return null;
-                    }
-                    case "afterShopPurchase": {
-                        // (playerUuid, playerName, cost)
-                        UUID buyer = (UUID) args[0];
-                        String buyerName = (String) args[1];
-                        double cost = (Double) args[2];
-                        collectTax("SHOP", buyer, buyerName,
-                            engine.getTaxEngine() != null
-                                ? engine.getTaxEngine().calculateShopTax(cost) : 0.0);
-                        return null;
-                    }
-                    default:
-                        // Unhandled interface method: generic defaults.
-                        Class<?> rt = method.getReturnType();
-                        if (hookInterface.isAssignableFrom(method.getDeclaringClass())) {
-                            if (rt == boolean.class) return false;
-                            if (rt == int.class) return 0;
-                            if (rt == double.class) return 0.0;
-                            if (rt == long.class) return 0L;
-                            return null;
-                        }
-                        return null;
+        @Override
+        public Decision allowAuctionListing(UUID sellerUuid, String sellerName, double price) {
+            return vetoGuard("allowAuctionListing", () -> {
+                Decision decision = vetoTrading(sellerUuid);
+                if (decision != null) return decision;
+                TransactionLimits limits = engine.getTransactionLimits();
+                if (limits != null && !limits.checkAuctionLimit(sellerUuid)) {
+                    return Decision.deny("Daily auction listing limit reached.");
                 }
+                return null;
+            });
+        }
+
+        @Override
+        public Decision allowAuctionPurchase(UUID buyerUuid, String buyerName, double price) {
+            return vetoGuard("allowAuctionPurchase", () -> vetoTrading(buyerUuid));
+        }
+
+        @Override
+        public Decision allowShopPurchase(UUID playerUuid, String playerName, double cost) {
+            return vetoGuard("allowShopPurchase", () -> vetoTrading(playerUuid));
+        }
+
+        @Override
+        public Decision allowShopSell(UUID playerUuid, String playerName) {
+            return vetoGuard("allowShopSell", () -> vetoTrading(playerUuid));
+        }
+
+        // ---- Notification hooks (fail-open on throw) ----
+
+        @Override
+        public void afterTransfer(UUID senderUuid, String senderName,
+                                  UUID receiverUuid, String receiverName,
+                                  double amount) {
+            notifyGuard("afterTransfer", () -> {
+                TransactionLimits limits = engine.getTransactionLimits();
+                if (limits != null) {
+                    limits.recordTransfer(senderUuid, amount);
+                }
+                collectTax("TRANSFER", senderUuid, senderName,
+                    engine.getTaxEngine() != null
+                        ? engine.getTaxEngine().calculateTransferTax(amount) : 0.0);
+                collectProgressiveTransferTax(senderUuid, senderName, amount);
+            });
+        }
+
+        @Override
+        public void afterAuctionListing(UUID sellerUuid, String sellerName, double price, double fee) {
+            notifyGuard("afterAuctionListing", () -> {
+                TransactionLimits limits = engine.getTransactionLimits();
+                if (limits != null) {
+                    limits.recordAuctionListing(sellerUuid);
+                }
+            });
+        }
+
+        @Override
+        public void afterAuctionSale(UUID sellerUuid, String sellerName,
+                                     UUID buyerUuid, String buyerName,
+                                     double price) {
+            notifyGuard("afterAuctionSale", () -> {
+                // B-2 fix (audit round 3): Core's settlement moves the buyer's
+                // money straight into the seller's balance WITHOUT consulting
+                // allowTransfer (the auction flow deliberately skips the generic
+                // transfer hooks), and allowAuctionPurchase only vetoes the BUYER.
+                // A frozen seller's pre-existing listings therefore kept funneling
+                // money into a frozen ("asset-frozen") account - laundering into
+                // untouchable escrow. CoreHookBridge's own freeze contract states
+                // "a frozen account must not be able to receive funds", so the
+                // proceeds of a settlement onto a frozen seller are clawed back
+                // into the treasury here, with a full audit trail. New listings
+                // are already blocked by the allowAuctionListing freeze veto;
+                // auction tax on the frozen seller is skipped (their proceeds are
+                // escrowed - charging tax out of pre-existing funds would
+                // double-punish the freeze).
+                AccountFreezer freezer = engine.getAccountFreezer();
+                if (freezer != null && sellerUuid != null && freezer.isFrozen(sellerUuid)) {
+                    escrowFrozenAuctionProceeds(sellerUuid, sellerName, price);
+                    return;
+                }
+
+                collectTax("AUCTION_SALE", sellerUuid, sellerName,
+                    engine.getTaxEngine() != null
+                        ? engine.getTaxEngine().calculateAuctionTax(price) : 0.0);
+            });
+        }
+
+        @Override
+        public void afterShopPurchase(UUID playerUuid, String playerName, double cost) {
+            notifyGuard("afterShopPurchase", () ->
+                collectTax("SHOP", playerUuid, playerName,
+                    engine.getTaxEngine() != null
+                        ? engine.getTaxEngine().calculateShopTax(cost) : 0.0));
+        }
+
+        // ---- Guard wrappers (the 2.1.x fail-closed contract, kept) ----
+
+        /**
+         * Wraps one veto computation in the historic failure policy: a
+         * throwing veto fails CLOSED (generic denial) when
+         * {@code enforcement.fail-closed=true} (default), and fails open
+         * only when the admin explicitly opted out.
+         */
+        private Decision vetoGuard(String hookName, Supplier<Decision> body) {
+            try {
+                Decision decision = body.get();
+                return decision != null ? decision : Decision.ALLOW;
             } catch (Throwable t) {
-                boolean isVeto = name.startsWith("allow");
                 boolean failClosed = true;
                 try {
                     failClosed = engine.getConfig().getBool("enforcement.fail-closed", true);
                 } catch (Throwable ignored) {
                     // Config unavailable: keep the safe default (fail-closed).
                 }
-                if (isVeto && failClosed) {
+                if (failClosed) {
                     // Fail CLOSED: an explicit denial is final for Core, so the
                     // economy stays protected even when Governance cannot answer.
                     SolidusGovernanceMod.LOGGER.error(
                         "CoreHookBridge: veto hook {} threw - failing CLOSED (enforcement.fail-closed=true). {}",
-                        name, t.toString());
-                    try {
-                        return deny(GENERIC_DENY);
-                    } catch (Throwable denyFailure) {
-                        SolidusGovernanceMod.LOGGER.error(
-                            "CoreHookBridge: constructing a denial failed: {}", denyFailure.toString());
-                        return genericDefault(method);
-                    }
+                        hookName, t.toString());
+                    return Decision.deny(GENERIC_DENY);
                 }
-                // Notification hooks (afterXxx) and fail-closed-opted-out servers:
-                // post-settlement recording/tax failures must never corrupt the
-                // already-committed state, so these fail open.
                 SolidusGovernanceMod.LOGGER.warn(
-                    "CoreHookBridge: hook method {} threw - failing open. {}", name, t.toString());
-                return genericDefault(method);
+                    "CoreHookBridge: veto hook {} threw - failing open (enforcement.fail-closed=false). {}",
+                    hookName, t.toString());
+                return Decision.ALLOW;
+            }
+        }
+
+        /**
+         * Wraps one post-settlement notification in the historic failure
+         * policy: recording/tax failures must never corrupt settled state,
+         * so they fail open (logged).
+         */
+        private void notifyGuard(String hookName, Runnable body) {
+            try {
+                body.run();
+            } catch (Throwable t) {
+                SolidusGovernanceMod.LOGGER.warn(
+                    "CoreHookBridge: hook method {} threw - failing open. {}", hookName, t.toString());
             }
         }
 
@@ -419,34 +407,34 @@ public final class CoreHookBridge {
         }
 
         /** Shared trading veto: emergency lock first, then per-account freeze. */
-        private Object vetoTrading(UUID player) throws Exception {
+        private Decision vetoTrading(UUID player) {
             InterventionManager intervention = engine.getInterventionManager();
             if (intervention != null && intervention.isTradingLocked()) {
                 String reason = intervention.getTradingLockReason();
-                return deny("Trading is currently locked by administrators"
+                return Decision.deny("Trading is currently locked by administrators"
                     + (reason != null && !reason.isBlank() ? ": " + reason : "."));
             }
             AccountFreezer freezer = engine.getAccountFreezer();
             if (freezer != null && player != null && freezer.isFrozen(player)) {
-                return deny("Your account is frozen by server administrators.");
+                return Decision.deny("Your account is frozen by server administrators.");
             }
             return null;
         }
 
         /** Transfer-limit veto (TransactionLimits self-gates on premium). */
-        private Object vetoTransferLimit(UUID sender, double amount) throws Exception {
+        private Decision vetoTransferLimit(UUID sender, double amount) {
             TransactionLimits limits = engine.getTransactionLimits();
             if (limits != null && !limits.checkTransferLimit(sender, amount)) {
-                return deny("Transfer denied: daily transaction limit reached.");
+                return Decision.deny("Transfer denied: daily transaction limit reached.");
             }
             return null;
         }
 
         /** Frozen receivers cannot receive funds (asset freeze, not just a spending ban). */
-        private Object vetoReceiverFrozen(UUID receiver) throws Exception {
+        private Decision vetoReceiverFrozen(UUID receiver) {
             AccountFreezer freezer = engine.getAccountFreezer();
             if (freezer != null && receiver != null && freezer.isFrozen(receiver)) {
-                return deny("The receiving account is frozen by server administrators.");
+                return Decision.deny("The receiving account is frozen by server administrators.");
             }
             return null;
         }
@@ -510,15 +498,6 @@ public final class CoreHookBridge {
                 SolidusGovernanceMod.LOGGER.warn(
                     "CoreHookBridge: progressive tax dispatch failed: {}", t.toString());
             }
-        }
-
-        private Object genericDefault(Method method) {
-            Class<?> rt = method.getReturnType();
-            if (rt == boolean.class) return false;
-            if (rt == int.class) return 0;
-            if (rt == double.class) return 0.0;
-            if (rt == long.class) return 0L;
-            return null;
         }
     }
 }
