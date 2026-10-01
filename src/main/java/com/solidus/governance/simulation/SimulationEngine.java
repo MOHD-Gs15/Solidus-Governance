@@ -1,12 +1,12 @@
 package com.solidus.governance.simulation;
 
+import com.solidus.api.SolidusApi;
+import com.solidus.api.SolidusApiAccess;
 import com.solidus.governance.GovernanceConfig;
 import com.solidus.governance.SolidusGovernanceMod;
 import com.solidus.governance.engine.GovernanceEngine;
 import com.solidus.governance.integration.SolidusIntegration;
 import com.solidus.governance.simulation.SimulationState;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -311,15 +311,28 @@ public class SimulationEngine {
         }
     }
 
+    /**
+     * Active-account sample basis (last-30-days window), matching the
+     * semantics Core's removed {@code getActiveAccountCount(int)} had.
+     */
+    private static final long ACTIVE_WINDOW_MS = 2592000000L;
+
     private int queryActiveAccountCount() {
+        // Primary path (2.3.2, audit closure): one bounded aggregate through
+        // Core's live ledger connection — backend-agnostic (shared SQLite or
+        // the pooled MySQL/MariaDB network) and compile-checked. Replaces the
+        // reflective walk over EconomyEngine/SQLiteStorage internals whose
+        // target methods no longer exist in Core (it silently returned -1 on
+        // every query since Core 2.2.x) and which could never see the MySQL
+        // backend at all.
         try {
-            int apiOpt;
-            if (SolidusIntegration.isSolidusLoaded() && (apiOpt = this.tryReflectionAccountCount()) > 0) {
-                return apiOpt;
+            int viaContract = this.tryContractAccountCount();
+            if (viaContract > 0) {
+                return viaContract;
             }
         }
         catch (Exception e) {
-            SolidusGovernanceMod.LOGGER.debug("Reflection-based account count query failed, trying JDBC fallback", (Throwable)e);
+            SolidusGovernanceMod.LOGGER.debug("Contract account-count query failed, trying file fallback", (Throwable)e);
         }
         try {
             int jdbcCount = this.tryJdbcAccountCount();
@@ -333,48 +346,32 @@ public class SimulationEngine {
         return -1;
     }
 
-    private int tryReflectionAccountCount() {
-        try {
-            Field apiField = SolidusIntegration.class.getDeclaredField("apiInstance");
-            apiField.trySetAccessible();
-            Object apiInst = apiField.get(null);
-            if (apiInst == null) {
-                return -1;
-            }
-            Method getEngineMethod = apiInst.getClass().getMethod("getEconomyEngine", new Class[0]);
-            Object engine = getEngineMethod.invoke(apiInst, new Object[0]);
-            if (engine == null) {
-                return -1;
-            }
-            Method getStorageMethod = engine.getClass().getMethod("getStorage", new Class[0]);
-            Object storage = getStorageMethod.invoke(engine, new Object[0]);
-            if (storage == null) {
-                return -1;
-            }
-            try {
-                Method countMethod = storage.getClass().getMethod("getActiveAccountCount", Integer.TYPE);
-                Object result = countMethod.invoke(storage, 30);
-                if (result instanceof Number) {
-                    return ((Number)result).intValue();
-                }
-            }
-            catch (NoSuchMethodException e) {
-                try {
-                    Method countMethod = storage.getClass().getMethod("getAccountCount", new Class[0]);
-                    Object result = countMethod.invoke(storage, new Object[0]);
-                    if (result instanceof Number) {
-                        return ((Number)result).intValue();
-                    }
-                }
-                catch (NoSuchMethodException e2) {
-                    SolidusGovernanceMod.LOGGER.debug("No account count method available on Solidus storage class");
-                }
-            }
+    /**
+     * Runs the active-account aggregate over the solidus-api ledger seam
+     * ({@code SolidusApi#withLedgerConnection}). The query is read-only and
+     * bounded (single COUNT with an index-backed time filter), and the
+     * callers only ever run it on the simulation thread or the async
+     * refresh — never the server tick thread — exactly what the
+     * {@code LedgerWork} accessibility contract requires.
+     */
+    private int tryContractAccountCount() throws Exception {
+        SolidusApi api = SolidusApiAccess.get();
+        if (api == null) {
+            // Core not loaded yet (or unit test without the contract) - the
+            // file fallback below still applies to single-server setups.
+            return -1;
         }
-        catch (Exception e) {
-            SolidusGovernanceMod.LOGGER.debug("Reflection account count attempt failed", (Throwable)e);
-        }
-        return -1;
+        long since = System.currentTimeMillis() - ACTIVE_WINDOW_MS;
+        Integer count = api.withLedgerConnection(conn -> {
+            String sql = "SELECT COUNT(*) FROM player_balances WHERE last_updated > ?";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setLong(1, since);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : -1;
+                }
+            }
+        });
+        return count != null ? count : -1;
     }
 
     private int tryJdbcAccountCount() {
@@ -406,7 +403,7 @@ public class SimulationEngine {
              Statement stmt = conn.createStatement();){
             int count;
             ResultSet rs;
-            long thirtyDaysAgoMs = System.currentTimeMillis() - 2592000000L;
+            long thirtyDaysAgoMs = System.currentTimeMillis() - ACTIVE_WINDOW_MS;
             String sql = "SELECT COUNT(*) FROM player_balances WHERE last_updated > ?";
             try (PreparedStatement ps = conn.prepareStatement(sql);){
                 ps.setLong(1, thirtyDaysAgoMs);

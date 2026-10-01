@@ -10,10 +10,16 @@ server owner, at a glance, which releases are built and tested to work together.
 | **Minor** `2.1.x → 2.2.0` | Breaking change: API, hook signature, config schema, or database layout. | No — the other mods must move to the `2.2` family in lockstep. |
 | **Major** `2.x → 3.0.0` | Architectural reset of the ecosystem contract. | No — full coordinated release. |
 
-Current family: **2.1.x** — Core, Analytics, Governance, and Enforcer are aligned on it (Governance patch 2.1.1).
+Current family: **2.3.x** — the update-resilience / family-contract era. Companions compile
+against the `solidus-api` contract jar (a Minecraft-free artifact nested inside Core) and
+declare a loader-enforced `"solidus": ">=2.3.2 <3.0.0"` floor. Governance sits at **2.3.2**:
+it migrated its integration layer and (in the 2.3.2 integration audit) its simulation's
+active-account query onto the contract — the family's last reflective reach-in into Core
+internals is gone.
 
-Each mod's `fabric.mod.json` `suggests` entry declares the **minimum family version** it
-was integration-tested against (e.g. `"solidus": ">=2.1.0"`).
+Each mod's `fabric.mod.json` `depends"solidus"` entry declares the **minimum Core
+version** it was integration-tested against (e.g. `">=2.3.2 <3.0.0"`); Fabric's loader
+refuses incompatible combinations instead of degrading silently.
 
 ## Where the number lives
 

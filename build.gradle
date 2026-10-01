@@ -77,15 +77,17 @@ dependencies {
     implementation "org.xerial:sqlite-jdbc:${project.sqlite_version}"
     include "org.xerial:sqlite-jdbc:${project.sqlite_version}"
 
-    // ── Solidus family contract (2.3.0, audit W-5) ─────────────────
+    // ── Solidus family contract (2.3.2, audit W-5) ─────────────────
     // Governance implements Core's SolidusTransactionHook and calls the
     // SolidusApi contract DIRECTLY (no more reflective MethodHandles into
-    // Core internals). The contract jar ships with Solidus Core (nested
-    // inside the core mod jar); compiling against the local copy keeps
-    // Governance self-contained. fabric.mod.json declares
-    // "depends": { "solidus": ">=2.3.0 <3.0.0" } so the loader — not a
+    // Core internals — including the simulation's active-account query since
+    // the 2.3.2 integration audit). The contract jar ships with Solidus Core
+    // (nested inside the core mod jar); compiling against the local copy
+    // keeps Governance self-contained. fabric.mod.json declares
+    // "depends": { "solidus": ">=2.3.2 <3.0.0" } so the loader — not a
     // log line — rejects incompatible combinations.
-    compileOnly files("libs/solidus-api-2.3.0.jar")
+    compileOnly files("libs/solidus-api-2.3.2.jar")
+    testImplementation files("libs/solidus-api-2.3.2.jar")
 
     testImplementation platform("org.junit:junit-bom:${project.junit_version}")
     testImplementation "org.junit.jupiter:junit-jupiter"
