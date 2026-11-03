@@ -297,6 +297,13 @@ class CommandTreeShapeTest {
      * a level at or below ours passes, anything stricter fails. Only the
      * permission facet matters for requirement predicates, so the other
      * constructor slots are null/zero.
+     *
+     * 26.3 note: the 26.1.2 constructor
+     * (CommandSource, Vec3, Vec2, ServerLevel, PermissionSet, String name,
+     * Component displayName, MinecraftServer, Entity) is gone — the name/display
+     * facets collapsed behind NamesProvider, with a (…, Component, MinecraftServer)
+     * convenience overload. That overload is what this fake uses; every facet
+     * beyond the permission set stays null/zero exactly as before.
      */
     private static CommandSourceStack sourceAtLevel(int level) {
         net.minecraft.server.permissions.PermissionSet permissionSet =
@@ -308,10 +315,8 @@ class CommandTreeShapeTest {
             net.minecraft.world.phys.Vec2.ZERO,
             null,                                        // ServerLevel
             permissionSet,
-            "test-source",
-            null,                                        // display name
-            null,                                        // MinecraftServer
-            null);                                       // entity
+            net.minecraft.network.chat.Component.literal("test-source"), // display name
+            null);                                       // MinecraftServer
     }
 
     private static java.util.Map<String, CommandNode<CommandSourceStack>> nodeIndex;
