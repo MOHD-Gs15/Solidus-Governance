@@ -92,7 +92,6 @@ dependencies {
     testImplementation platform("org.junit:junit-bom:${project.junit_version}")
     testImplementation "org.junit.jupiter:junit-jupiter"
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
-    testImplementation "org.mockito:mockito-core:${project.mockito_version}"
 }
 
 tasks.withType(JavaCompile).configureEach {
