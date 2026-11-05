@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 (SA2-027)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.4.0 (SA2-027)
 
       - name: Set up JDK 25
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1 (SA2-027)
